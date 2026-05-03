@@ -10,6 +10,7 @@ import AeroCalcPanel from "@/components/AeroCalcPanel";
 import { runAeroCalc, schemeToCalcGraph, CalcResult, CalcNode, CalcAirway } from "@/lib/aeroCalc";
 import { linkFansToAirways, buildSegments, calcWorkingPoint, FanLink } from "@/lib/fanLinker";
 import AirwayPropPanel from "@/components/AirwayPropPanel";
+import SchemeRibbon from "@/components/SchemeRibbon";
 
 // ─── Типы ──────────────────────────────────────────────────────────────────────
 type ToolMode =
@@ -1269,130 +1270,40 @@ export default function VentScheme2D() {
 
   const inputCls = "w-full rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none focus:border-blue-400 transition-colors";
 
-  const toolGroups: { label: string; tools: ToolMode[] }[] = [
-    { label: "Выбор", tools: ["select", "pan"] },
-    { label: "Выработки", tools: ["airway"] },
-    { label: "Объекты", tools: ["fan", "door", "wall", "sensor", "arrow"] },
-    { label: "Прочее", tools: ["position", "label"] },
-  ];
-
   return (
     <div className="flex h-full flex-col" style={{ background: "#f1f5f9" }}>
-      {/* ── Toolbar ── */}
-      <div className="flex flex-shrink-0 items-center gap-1 border-b border-slate-200 bg-white px-3 py-1.5 shadow-sm flex-wrap">
-        {/* Заголовок */}
-        <div className="flex items-center gap-2 mr-3">
-          <div className="h-6 w-6 rounded flex items-center justify-center" style={{ background: "#1e3a5f" }}>
-            <span className="text-white font-bold" style={{ fontSize: 10 }}>В</span>
-          </div>
-          <span className="font-display text-xs font-bold text-slate-700 uppercase tracking-wider">Схема</span>
-        </div>
-
-        <div className="h-5 w-px bg-slate-200 mx-1" />
-
-        {/* Инструменты */}
-        {toolGroups.map(({ label, tools: tls }) => (
-          <div key={label} className="flex items-center gap-0.5">
-            {tls.map((t) => (
-              <button key={t} onClick={() => setTool(t)} title={TOOL_LABELS[t]}
-                className="flex h-7 w-7 items-center justify-center rounded transition-all"
-                style={{ background: tool === t ? "#1e3a5f" : "transparent", color: tool === t ? "#fff" : "#475569" }}>
-                <Icon name={TOOL_ICONS[t]} size={14} fallback="Circle" />
-              </button>
-            ))}
-            <div className="h-5 w-px bg-slate-200 mx-1" />
-          </div>
-        ))}
-
-        {/* Стиль выработки */}
-        {tool === "airway" && (
-          <div className="flex items-center gap-1 mr-2">
-            <span className="text-xs text-slate-500">Тип:</span>
-            {(Object.entries(AIRWAY_STYLES) as [AirwayStyle, typeof AIRWAY_STYLES[AirwayStyle]][]).map(([key, st]) => (
-              <button key={key} onClick={() => setAirwayStyle(key)}
-                title={key}
-                className="h-6 px-2 rounded text-xs font-medium border transition-all"
-                style={{
-                  borderColor: airwayStyle === key ? st.color : "#e2e8f0",
-                  background: airwayStyle === key ? st.color : "white",
-                  color: airwayStyle === key ? "#fff" : "#64748b",
-                }}>
-                {key === "main" ? "Гл." : key === "branch" ? "Уч." : key === "intake" ? "Свеж." : key === "exhaust" ? "Исх." : "Труба"}
-              </button>
-            ))}
-            <span className="text-xs text-slate-400 ml-1">ДвКлик/ПКМ — завершить</span>
-          </div>
-        )}
-
-        {tool === "label" && (
-          <input value={labelInput} onChange={e => setLabelInput(e.target.value)}
-            placeholder="Текст метки..."
-            className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-800 outline-none focus:border-blue-400"
-            style={{ width: 130 }} />
-        )}
-
-        <div className="ml-auto flex items-center gap-2">
-          {/* Зум */}
-          <div className="flex items-center gap-1">
-            <button onClick={() => setViewport(v => ({ ...v, scale: Math.min(5, v.scale * 1.2) }))}
-              className="h-6 w-6 flex items-center justify-center rounded hover:bg-slate-100 text-slate-500">
-              <Icon name="ZoomIn" size={13} />
-            </button>
-            <span className="font-mono text-xs text-slate-500" style={{ minWidth: 38, textAlign: "center" }}>
-              {Math.round(viewport.scale * 100)}%
-            </span>
-            <button onClick={() => setViewport(v => ({ ...v, scale: Math.max(0.1, v.scale * 0.85) }))}
-              className="h-6 w-6 flex items-center justify-center rounded hover:bg-slate-100 text-slate-500">
-              <Icon name="ZoomOut" size={13} />
-            </button>
-          </div>
-          <button onClick={() => setViewport({ x: 0, y: 0, scale: 1 })}
-            className="h-6 px-2 rounded text-xs hover:bg-slate-100 text-slate-500">
-            Сброс
-          </button>
-
-          <div className="h-5 w-px bg-slate-200" />
-
-          {/* Расчёт */}
-          <button onClick={() => { runCalc(); }}
-            disabled={isCalcRunning}
-            className="flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-all hover:opacity-90 disabled:opacity-60"
-            style={{ background: calcResult ? "#22c55e" : "#7c3aed", color: "#fff" }}>
-            {isCalcRunning
-              ? <><Icon name="Loader" size={13} className="animate-spin" />Расчёт...</>
-              : <><Icon name="Calculator" size={13} />Расчёт</>}
-          </button>
-          {calcResult && (
-            <button onClick={() => setShowCalcPanel(v => !v)}
-              className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-all hover:opacity-80"
-              style={{ background: showCalcPanel ? "#ede9fe" : "#f3f4f6", color: showCalcPanel ? "#7c3aed" : "#64748b" }}>
-              <Icon name="BarChart3" size={12} />
-              {showCalcPanel ? "Скрыть" : "Результаты"}
-            </button>
-          )}
-
-          <div className="h-5 w-px bg-slate-200" />
-
-          {/* Импорт DXF */}
-          <button onClick={() => setShowDxfImport(true)}
-            className="flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-all hover:opacity-90"
-            style={{ background: "#0369a1", color: "#fff" }}>
-            <Icon name="FileUp" size={13} />
-            Импорт DXF
-          </button>
-
-          <div className="h-5 w-px bg-slate-200" />
-
-          {/* Кнопка 3D */}
-          <button onClick={() => setShow3D(true)}
-            className="flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-all hover:opacity-90"
-            style={{ background: "#1e3a5f", color: "#fff" }}
-            title={lastPlane ? `Последний вид: ${lastPlane.label}` : "Открыть 3D-просмотр"}>
-            <Icon name="Box" size={13} />
-            {lastPlane ? `3D · ${lastPlane.label}` : "Просмотр 3D"}
-          </button>
-        </div>
-      </div>
+      {/* ── Ribbon ── */}
+      <SchemeRibbon
+        tool={tool}
+        airwayStyle={airwayStyle}
+        viewport={viewport}
+        selectedId={selectedId}
+        calcResult={calcResult}
+        isCalcRunning={isCalcRunning}
+        zoom={viewport.scale}
+        onTool={setTool}
+        onAirwayStyle={setAirwayStyle}
+        onZoomIn={() => setViewport(v => ({ ...v, scale: Math.min(5, v.scale * 1.2) }))}
+        onZoomOut={() => setViewport(v => ({ ...v, scale: Math.max(0.1, v.scale * 0.85) }))}
+        onZoomReset={() => setViewport({ x: 0, y: 0, scale: 1 })}
+        onDelete={() => {
+          if (!selectedId) return;
+          setScheme(s => ({
+            airways: s.airways.filter(a => a.id !== selectedId),
+            positions: s.positions.filter(p => p.id !== selectedId),
+            objects: s.objects.filter(o => o.id !== selectedId),
+          }));
+          setSelectedId(null);
+          setPropPanel(null);
+        }}
+        onCalc={runCalc}
+        onShowCalc={() => setShowCalcPanel(v => !v)}
+        onImportDxf={() => setShowDxfImport(true)}
+        on3D={() => setShow3D(true)}
+        onCopy={() => {}}
+        onPaste={() => {}}
+        onCut={() => {}}
+      />
 
       {/* ── Основная область ── */}
       <div className="flex flex-1 min-h-0">
