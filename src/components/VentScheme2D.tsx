@@ -8,6 +8,7 @@ import NodePropertiesPanel, {
 } from "@/components/NodePropertiesPanel";
 import AeroCalcPanel from "@/components/AeroCalcPanel";
 import { runAeroCalc, schemeToCalcGraph, CalcResult, CalcNode, CalcAirway } from "@/lib/aeroCalc";
+import { linkFansToAirways, buildSegments, calcWorkingPoint, FanLink } from "@/lib/fanLinker";
 import AirwayPropPanel from "@/components/AirwayPropPanel";
 
 // ─── Типы ──────────────────────────────────────────────────────────────────────
@@ -390,43 +391,105 @@ export default function VentScheme2D() {
   const [calcResult, setCalcResult] = useState<CalcResult | null>(null);
   const [calcNodes, setCalcNodes] = useState<CalcNode[]>([]);
   const [calcAirways, setCalcAirways] = useState<CalcAirway[]>([]);
+  const [calcFanLinks, setCalcFanLinks] = useState<FanLink[]>([]);
   const [showCalcPanel, setShowCalcPanel] = useState(false);
   const [isCalcRunning, setIsCalcRunning] = useState(false);
 
   const runCalc = () => {
     setIsCalcRunning(true);
     setTimeout(() => {
-      // Собираем props узлов для передачи в конвертер
+      // ── 1. Узловые override-свойства ──────────────────────────────────────
       const nodeOverrides: Record<string, {
         coordZ: number; airTemp: number; wallTemp: number;
         appliedPressure: number; connectedToAtm: boolean;
       }> = {};
       Object.entries(nodeProps).forEach(([key, np]) => {
         nodeOverrides[key] = {
-          coordZ: np.coordZ,
-          airTemp: np.airTemp,
-          wallTemp: np.wallTemp,
-          appliedPressure: np.appliedPressure,
-          connectedToAtm: np.connectedToAtm,
+          coordZ: np.coordZ, airTemp: np.airTemp, wallTemp: np.wallTemp,
+          appliedPressure: np.appliedPressure, connectedToAtm: np.connectedToAtm,
         };
       });
 
+      // ── 2. Привязываем вентиляторы к ближайшим выработкам ─────────────────
+      const fans = scheme.objects
+        .filter(o => o.type === "fan")
+        .map(o => ({
+          id:          o.id,
+          x:           o.x,
+          y:           o.y,
+          fanCurve:    o.fanCurve,
+          fanPressure: o.fanPressure,
+          label:       o.label,
+        }));
+
+      const rawSegs = scheme.airways.map(aw => ({
+        id:     aw.id,
+        points: aw.points.map(p => ({ x: p.x, y: p.y })),
+      }));
+      const segments  = buildSegments(rawSegs);
+      const fanLinks  = linkFansToAirways(fans, segments);
+
+      // ── 3. Конвертируем схему в граф, передаём Q-P кривые вентиляторов ────
       const { nodes, airways: calAirways } = schemeToCalcGraph(scheme.airways, nodeOverrides);
+
+      // Патчим CalcAirway данными вентиляторов
+      fanLinks.forEach(link => {
+        const aw = calAirways.find(a => a.id === link.segId);
+        if (!aw) return;
+        if (link.curveA !== undefined && link.curveB !== undefined) {
+          aw.fanCurveA  = link.curveA;
+          aw.fanCurveB  = link.curveB;
+          aw.fanPressure = undefined;
+        } else if (link.pressure !== undefined) {
+          aw.fanPressure = link.pressure;
+          aw.fanCurveA   = undefined;
+          aw.fanCurveB   = undefined;
+        }
+      });
+
+      // ── 4. Расчёт ─────────────────────────────────────────────────────────
       const result = runAeroCalc(nodes, calAirways);
 
-      // Обновляем вычисленные поля в NodeProperties
+      // ── 5. Обновляем рабочие точки вентиляторов ───────────────────────────
+      setScheme(s => ({
+        ...s,
+        objects: s.objects.map(o => {
+          if (o.type !== "fan") return o;
+          const link = fanLinks.find(l => l.fanId === o.id);
+          if (!link) return o;
+
+          const q   = result.airwayQ[link.segId] ?? 0;
+          const dp  = result.airwayDeltaP[link.segId] ?? 0;
+          const fan = result.airwayFanDeltaP?.[link.segId] ?? 0;
+
+          // Рабочая точка: если есть кривая — вычисляем аналитически
+          let workQ = Math.abs(q);
+          let workP = fan > 0 ? fan : Math.abs(dp);
+
+          if (link.curveA !== undefined && link.curveB !== undefined) {
+            const R = calAirways.find(a => a.id === link.segId)
+              ? result.airwayR[link.segId] ?? 0 : 0;
+            const wp = calcWorkingPoint(link.curveA, link.curveB, R);
+            workQ = wp.Q;
+            workP = wp.P;
+          }
+
+          return { ...o, fanWorkQ: workQ, fanWorkP: workP };
+        }),
+      }));
+
+      // ── 6. Обновляем вычисленные поля узлов ───────────────────────────────
       setNodeProps(prev => {
         const next = { ...prev };
         Object.entries(result.nodePressure).forEach(([nid, p]) => {
-          // Ищем совпадение по id узла (ключ может отличаться)
           Object.keys(next).forEach(key => {
             if (next[key].id === nid || key === nid) {
               next[key] = {
                 ...next[key],
-                calcPressure: Math.round(p),
-                calcAirTemp: Math.round((result.nodeAirTemp[nid] ?? next[key].airTemp) * 10) / 10,
-                calcWallTemp: Math.round((result.nodeWallTemp[nid] ?? next[key].wallTemp) * 10) / 10,
-                calcGasConc: Math.round((result.nodeGasConc[nid] ?? 0) * 100) / 100,
+                calcPressure:       Math.round(p),
+                calcAirTemp:        Math.round((result.nodeAirTemp[nid] ?? next[key].airTemp) * 10) / 10,
+                calcWallTemp:       Math.round((result.nodeWallTemp[nid] ?? next[key].wallTemp) * 10) / 10,
+                calcGasConc:        Math.round((result.nodeGasConc[nid] ?? 0) * 100) / 100,
                 calcExplosionPressure: Math.round(result.nodeExplosionP[nid] ?? 0),
               };
             }
@@ -435,6 +498,7 @@ export default function VentScheme2D() {
         return next;
       });
 
+      setCalcFanLinks(fanLinks);
       setCalcNodes(nodes);
       setCalcAirways(calAirways);
       setCalcResult(result);
@@ -814,6 +878,82 @@ export default function VentScheme2D() {
         }
       }
 
+      // ── Вентилятор: рабочая точка и линия привязки ──────────────────────
+      if (obj.type === "fan") {
+        const link = calcFanLinks.find(l => l.fanId === obj.id);
+
+        // Линия привязки к выработке
+        if (link) {
+          const seg = scheme.airways.reduce<{ x: number; y: number } | null>((acc, aw) => {
+            for (let si = 0; si < aw.points.length - 1; si++) {
+              if (`${aw.id}_seg${si}` === link.segId) {
+                const p1 = aw.points[si], p2 = aw.points[si + 1];
+                return { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+              }
+            }
+            return acc;
+          }, null);
+
+          if (seg) {
+            ctx.strokeStyle = "rgba(251,191,36,0.45)";
+            ctx.lineWidth   = 1;
+            ctx.setLineDash([4, 3]);
+            ctx.beginPath();
+            ctx.moveTo(obj.x, obj.y);
+            ctx.lineTo(seg.x, seg.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Маленький ромб в точке привязки
+            ctx.fillStyle = "#fbbf24";
+            ctx.beginPath();
+            ctx.moveTo(seg.x,     seg.y - 5);
+            ctx.lineTo(seg.x + 5, seg.y);
+            ctx.lineTo(seg.x,     seg.y + 5);
+            ctx.lineTo(seg.x - 5, seg.y);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+
+        // Рабочая точка (badge над вентилятором)
+        if (obj.fanWorkQ !== undefined && obj.fanWorkQ > 0) {
+          const wQ = obj.fanWorkQ;
+          const wP = obj.fanWorkP ?? 0;
+
+          const badge = `${wQ.toFixed(1)} м³/с · ${Math.round(wP)} Па`;
+          ctx.font = "bold 9px 'IBM Plex Mono', monospace";
+          const tw = ctx.measureText(badge).width;
+
+          const bx = obj.x - tw / 2 - 5;
+          const by = obj.y - 32;
+
+          // Фон бейджа
+          ctx.fillStyle = "#1e3a5f";
+          ctx.fillRect(bx, by, tw + 10, 14);
+
+          // Текст
+          ctx.fillStyle = "#fbbf24";
+          ctx.textAlign = "center";
+          ctx.fillText(badge, obj.x, by + 10);
+
+          // Красная точка — рабочая точка
+          ctx.fillStyle = "#ef4444";
+          ctx.shadowColor = "#ef4444";
+          ctx.shadowBlur  = 6;
+          ctx.beginPath();
+          ctx.arc(obj.x + tw / 2 + 1, by + 7, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        } else if (link && calcResult) {
+          // Нет рабочей точки — показываем что вентилятор привязан но Q=0
+          ctx.font = "9px 'IBM Plex Sans', sans-serif";
+          ctx.fillStyle = "#f59e0b";
+          ctx.textAlign = "center";
+          ctx.fillText("привязан", obj.x, obj.y - 28);
+        }
+      }
+
       // Выделение
       if (isSelected) {
         ctx.strokeStyle = "#3b82f6";
@@ -873,7 +1013,7 @@ export default function VentScheme2D() {
     }
 
     ctx.restore();
-  }, [scheme, viewport, selectedId, selectedNodeId, nodeProps, tool, drawingAirway, mousePos, airwayStyle, calcResult]);
+  }, [scheme, viewport, selectedId, selectedNodeId, nodeProps, tool, drawingAirway, mousePos, airwayStyle, calcResult, calcFanLinks]);
 
   useEffect(() => { redraw(); }, [redraw]);
 
@@ -1403,6 +1543,12 @@ export default function VentScheme2D() {
           result={calcResult}
           nodes={calcNodes}
           airways={calcAirways}
+          fanLinks={calcFanLinks}
+          fans={scheme.objects.filter(o => o.type === "fan").map(o => ({
+            id: o.id, label: o.label,
+            fanWorkQ: o.fanWorkQ, fanWorkP: o.fanWorkP,
+            fanCurve: o.fanCurve, fanMotorPower: o.fanMotorPower,
+          }))}
           onClose={() => setShowCalcPanel(false)}
           onRecalc={runCalc}
           isRunning={isCalcRunning}

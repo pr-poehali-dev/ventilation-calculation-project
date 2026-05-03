@@ -1,17 +1,29 @@
 import React, { useState } from "react";
 import Icon from "@/components/ui/icon";
 import { CalcResult, CalcAirway, CalcNode } from "@/lib/aeroCalc";
+import { FanLink } from "@/lib/fanLinker";
+
+interface FanInfo {
+  id: string;
+  label?: string;
+  fanWorkQ?: number;
+  fanWorkP?: number;
+  fanCurve?: [number, number][];
+  fanMotorPower?: string;
+}
 
 interface Props {
   result: CalcResult | null;
   nodes: CalcNode[];
   airways: CalcAirway[];
+  fanLinks?: FanLink[];
+  fans?: FanInfo[];
   onClose: () => void;
   onRecalc: () => void;
   isRunning: boolean;
 }
 
-type Tab = "overview" | "nodes" | "airways" | "loops" | "warnings";
+type Tab = "overview" | "nodes" | "airways" | "fans" | "loops" | "warnings";
 
 const fmt1 = (v: number) => v.toFixed(1);
 const fmt2 = (v: number) => v.toFixed(2);
@@ -33,15 +45,16 @@ function Bar({ value, max, color }: { value: number; max: number; color: string 
   );
 }
 
-export default function AeroCalcPanel({ result, nodes, airways, onClose, onRecalc, isRunning }: Props) {
+export default function AeroCalcPanel({ result, nodes, airways, fanLinks = [], fans = [], onClose, onRecalc, isRunning }: Props) {
   const [tab, setTab] = useState<Tab>("overview");
 
   const TABS: { id: Tab; label: string; icon: string; count?: number }[] = [
-    { id: "overview",  label: "Сводка",    icon: "LayoutDashboard" },
-    { id: "nodes",     label: "Узлы",      icon: "Circle",      count: nodes.length },
-    { id: "airways",   label: "Ветви",     icon: "Minus",       count: airways.length },
-    { id: "loops",     label: "Контуры",   icon: "RefreshCw",   count: result?.loopIds.length },
-    { id: "warnings",  label: "Сообщения", icon: "AlertTriangle",
+    { id: "overview",  label: "Сводка",      icon: "LayoutDashboard" },
+    { id: "fans",      label: "Вентиляторы", icon: "Loader",      count: fanLinks.length },
+    { id: "nodes",     label: "Узлы",        icon: "Circle",      count: nodes.length },
+    { id: "airways",   label: "Ветви",       icon: "Minus",       count: airways.length },
+    { id: "loops",     label: "Контуры",     icon: "RefreshCw",   count: result?.loopIds.length },
+    { id: "warnings",  label: "Сообщения",   icon: "AlertTriangle",
       count: result ? result.errors.length + result.warnings.length : 0 },
   ];
 
@@ -246,6 +259,109 @@ export default function AeroCalcPanel({ result, nodes, airways, onClose, onRecal
                       })}
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* ══ Вентиляторы ══ */}
+            {tab === "fans" && (
+              <div className="p-4 space-y-3">
+                {fanLinks.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-10 gap-3" style={{ color: "#334155" }}>
+                    <Icon name="Loader" size={36} style={{ color: "#1e293b" }} />
+                    <p className="text-sm text-center">Вентиляторов не привязано</p>
+                    <p className="text-xs text-center px-6" style={{ color: "#1e293b" }}>
+                      Разместите объект «Вентилятор» на схеме рядом с выработкой
+                      и задайте кривую Q-P в его свойствах
+                    </p>
+                  </div>
+                ) : fanLinks.map(link => {
+                  const fan    = fans.find(f => f.id === link.fanId);
+                  const q      = result ? (result.airwayQ[link.segId] ?? 0) : 0;
+                  const fanDP  = result ? (result.airwayFanDeltaP?.[link.segId] ?? 0) : 0;
+                  const workQ  = fan?.fanWorkQ ?? Math.abs(q);
+                  const workP  = fan?.fanWorkP ?? fanDP;
+                  const power  = workQ * workP / 1000;
+
+                  // Кривая Q-P → макс. давление (при Q=0)
+                  const p0    = link.curveA ?? link.pressure ?? 0;
+                  const qMax  = link.curveA && link.curveB
+                    ? Math.sqrt(link.curveA / link.curveB) : 0;
+
+                  return (
+                    <div key={link.fanId} className="rounded-xl border p-3"
+                      style={{ borderColor: "#1e293b", background: "#0d1826" }}>
+
+                      {/* Заголовок */}
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <div className="h-6 w-6 rounded-full flex items-center justify-center"
+                            style={{ background: "#1e3a5f" }}>
+                            <Icon name="Loader" size={12} style={{ color: "#fbbf24" }} />
+                          </div>
+                          <span className="text-sm font-semibold text-white">
+                            {fan?.label ?? `Вентилятор ${link.fanId.slice(-4)}`}
+                          </span>
+                        </div>
+                        <span className="text-xs rounded px-2 py-0.5 font-mono"
+                          style={{ background: link.curveA ? "#1e3a5f" : "#1e293b",
+                            color: link.curveA ? "#60a5fa" : "#475569" }}>
+                          {link.curveA ? "Q-P кривая" : link.pressure ? "P=const" : "не задан"}
+                        </span>
+                      </div>
+
+                      {/* Параметры кривой */}
+                      {link.curveA !== undefined && (
+                        <div className="grid grid-cols-2 gap-2 mb-2 text-xs">
+                          <div className="rounded p-2" style={{ background: "#1e293b" }}>
+                            <span style={{ color: "#475569" }}>P₀ (при Q=0)</span>
+                            <p className="font-mono font-bold" style={{ color: "#60a5fa" }}>
+                              {Math.round(p0)} Па
+                            </p>
+                          </div>
+                          <div className="rounded p-2" style={{ background: "#1e293b" }}>
+                            <span style={{ color: "#475569" }}>Q_max (при P=0)</span>
+                            <p className="font-mono font-bold" style={{ color: "#60a5fa" }}>
+                              {qMax.toFixed(1)} м³/с
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Рабочая точка */}
+                      <div className="rounded-lg p-2.5 mb-2"
+                        style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                        <p className="text-xs font-semibold mb-1.5 flex items-center gap-1.5"
+                          style={{ color: "#f87171" }}>
+                          <div className="h-2 w-2 rounded-full" style={{ background: "#ef4444" }} />
+                          Рабочая точка
+                        </p>
+                        <div className="grid grid-cols-3 gap-2 text-xs">
+                          {[
+                            { l: "Q*",      v: `${workQ.toFixed(1)} м³/с`, c: "#60a5fa" },
+                            { l: "P*",      v: `${Math.round(workP)} Па`,  c: "#4ade80" },
+                            { l: "N*",      v: `${power.toFixed(1)} кВт`,  c: "#fbbf24" },
+                          ].map(({ l, v, c }) => (
+                            <div key={l}>
+                              <p style={{ color: "#475569" }}>{l}</p>
+                              <p className="font-mono font-bold" style={{ color: c }}>{v}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Привязка */}
+                      <div className="flex items-center gap-2 text-xs" style={{ color: "#334155" }}>
+                        <Icon name="Link" size={11} style={{ color: "#475569" }} />
+                        <span>Ветвь: </span>
+                        <span className="font-mono" style={{ color: "#64748b" }}>
+                          {link.segId.replace(/_seg\d+$/, "")}
+                        </span>
+                        <span style={{ color: "#1e293b" }}>·</span>
+                        <span>d={Math.round(link.dist)}px</span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
