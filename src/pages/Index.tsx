@@ -5,7 +5,6 @@ import VentScheme2D from "@/components/VentScheme2D";
 
 // ─── Типы ────────────────────────────────────────────────────────────────────
 type Section =
-  | "dashboard"
   | "projects"
   | "aerodynamics"
   | "equipment"
@@ -25,7 +24,6 @@ interface NavItem {
 
 // ─── Данные навигации ─────────────────────────────────────────────────────────
 const navItems: NavItem[] = [
-  { id: "dashboard", label: "Дашборд", icon: "LayoutDashboard" },
   { id: "scheme", label: "Схема 2D", icon: "Map" },
   { id: "model", label: "3D-модель", icon: "Box" },
   { id: "projects", label: "Проекты", icon: "FolderOpen", badge: "3" },
@@ -841,11 +839,10 @@ function ProjectsSection() {
 import React from "react";
 
 export default function Index() {
-  const [activeSection, setActiveSection] = useState<Section>("dashboard");
+  const [activeSection, setActiveSection] = useState<Section>("scheme");
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   const sectionComponents: Record<Section, React.ReactElement> = {
-    dashboard: <DashboardSection />,
     scheme: <VentScheme2D />,
     model: <MineModel3D />,
     projects: <ProjectsSection />,
