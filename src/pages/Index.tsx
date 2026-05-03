@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Icon from "@/components/ui/icon";
 import MineModel3D from "@/components/MineModel3D";
+import VentScheme2D from "@/components/VentScheme2D";
 
 // ─── Типы ────────────────────────────────────────────────────────────────────
 type Section =
@@ -12,7 +13,8 @@ type Section =
   | "export"
   | "standards"
   | "charts"
-  | "model";
+  | "model"
+  | "scheme";
 
 interface NavItem {
   id: Section;
@@ -24,6 +26,7 @@ interface NavItem {
 // ─── Данные навигации ─────────────────────────────────────────────────────────
 const navItems: NavItem[] = [
   { id: "dashboard", label: "Дашборд", icon: "LayoutDashboard" },
+  { id: "scheme", label: "Схема 2D", icon: "Map" },
   { id: "model", label: "3D-модель", icon: "Box" },
   { id: "projects", label: "Проекты", icon: "FolderOpen", badge: "3" },
   { id: "aerodynamics", label: "Аэродинамика", icon: "Wind" },
@@ -843,6 +846,7 @@ export default function Index() {
 
   const sectionComponents: Record<Section, React.ReactElement> = {
     dashboard: <DashboardSection />,
+    scheme: <VentScheme2D />,
     model: <MineModel3D />,
     projects: <ProjectsSection />,
     aerodynamics: <AerodynamicsSection />,
@@ -922,8 +926,8 @@ export default function Index() {
           </div>
         </header>
 
-        <main className={`flex-1 overflow-y-auto ${activeSection === "model" ? "p-4 flex flex-col" : "p-6"}`}>
-          <div className={`animate-fade-up ${activeSection === "model" ? "flex-1 flex flex-col min-h-0" : ""}`} key={activeSection}>
+        <main className={`flex-1 overflow-hidden ${(activeSection === "model" || activeSection === "scheme") ? "p-0 flex flex-col" : "overflow-y-auto p-6"}`}>
+          <div className={`animate-fade-up ${(activeSection === "model" || activeSection === "scheme") ? "flex-1 flex flex-col min-h-0 h-full" : ""}`} key={activeSection}>
             {sectionComponents[activeSection]}
           </div>
         </main>
