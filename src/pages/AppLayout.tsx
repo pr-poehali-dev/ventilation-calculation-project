@@ -6,12 +6,14 @@ import VentScheme2D from "@/components/VentScheme2D";
 // (dashboard section was removed per user request)
 import { AerodynamicsSection, ThermalSection } from "@/pages/sections/CalcSections";
 import { EquipmentSection, StandardsSection, ChartsSection, ExportSection, ProjectsSection } from "@/pages/sections/DataSections";
+import FanCatalog from "@/pages/sections/FanCatalog";
 
 // ─── Типы ────────────────────────────────────────────────────────────────────
 type Section =
   | "projects"
   | "aerodynamics"
   | "equipment"
+  | "fans"
   | "thermal"
   | "export"
   | "standards"
@@ -33,6 +35,7 @@ const navItems: NavItem[] = [
   { id: "projects", label: "Проекты", icon: "FolderOpen", badge: "3" },
   { id: "aerodynamics", label: "Аэродинамика", icon: "Wind" },
   { id: "equipment", label: "Оборудование", icon: "Settings2" },
+  { id: "fans",      label: "Вентиляторы",  icon: "Loader" },
   { id: "thermal", label: "Теплорасчёт", icon: "Thermometer" },
   { id: "charts", label: "Диаграммы", icon: "BarChart3" },
   { id: "standards", label: "Нормы СП/ГОСТ", icon: "BookOpen" },
@@ -49,6 +52,7 @@ export default function AppLayout() {
     projects: <ProjectsSection />,
     aerodynamics: <AerodynamicsSection />,
     equipment: <EquipmentSection />,
+    fans: <FanCatalog />,
     thermal: <ThermalSection />,
     charts: <ChartsSection />,
     standards: <StandardsSection />,
@@ -124,8 +128,8 @@ export default function AppLayout() {
           </div>
         </header>
 
-        <main className={`flex-1 overflow-hidden ${(activeSection === "model" || activeSection === "scheme") ? "p-0 flex flex-col" : "overflow-y-auto p-6"}`}>
-          <div className={`animate-fade-up ${(activeSection === "model" || activeSection === "scheme") ? "flex-1 flex flex-col min-h-0 h-full" : ""}`} key={activeSection}>
+        <main className={`flex-1 overflow-hidden ${(activeSection === "model" || activeSection === "scheme" || activeSection === "fans") ? "p-0 flex flex-col" : "overflow-y-auto p-6"}`}>
+          <div className={`animate-fade-up ${(activeSection === "model" || activeSection === "scheme" || activeSection === "fans") ? "flex-1 flex flex-col min-h-0 h-full" : ""}`} key={activeSection}>
             {sectionComponents[activeSection]}
           </div>
         </main>
