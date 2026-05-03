@@ -3,6 +3,9 @@ import Icon from "@/components/ui/icon";
 import VentScheme3DView, { Airway3D, Position3D, PlaneInfo } from "@/components/VentScheme3DView";
 import DxfImportDialog from "@/components/DxfImportDialog";
 import { ConvertedScheme } from "@/lib/dxfParser";
+import NodePropertiesPanel, {
+  NodeProperties, NodeMeasurement, NodePipe, NodeIndicator, defaultNode,
+} from "@/components/NodePropertiesPanel";
 
 // ─── Типы ──────────────────────────────────────────────────────────────────────
 type ToolMode =
@@ -321,6 +324,25 @@ export default function VentScheme2D() {
   // DXF импорт
   const [showDxfImport, setShowDxfImport] = useState(false);
 
+  // ── Узлы (вершины) — хранилище свойств ───────────────────────────────────
+  const [nodeProps, setNodeProps] = useState<Record<string, NodeProperties>>({});
+  const [nodeMeasures] = useState<Record<string, NodeMeasurement[]>>({});
+  const [nodePipes] = useState<Record<string, NodePipe[]>>({});
+  const [nodeIndicators] = useState<Record<string, NodeIndicator[]>>({});
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
+  // Получаем или создаём свойства узла по ключу
+  const getOrCreateNode = (key: string, _unused: number, x: number, y: number, z?: number): NodeProperties => {
+    if (nodeProps[key]) return nodeProps[key];
+    const nd = defaultNode(key, x, y, z);
+    setNodeProps(prev => ({ ...prev, [key]: nd }));
+    return nd;
+  };
+
+  const updateNodeProps = (key: string, patch: Partial<NodeProperties>) => {
+    setNodeProps(prev => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+  };
+
   const handleDxfImport = (data: ConvertedScheme, mode: "replace" | "append") => {
     const newAirways = data.airways.map(a => ({
       id: a.id,
@@ -458,14 +480,34 @@ export default function VentScheme2D() {
       }
 
       // Узловые точки
-      aw.points.forEach((p) => {
-        ctx.fillStyle = isSelected ? "#3b82f6" : "#fff";
-        ctx.strokeStyle = st.color;
-        ctx.lineWidth = 2;
+      aw.points.forEach((p, pi) => {
+        const nodeKey = `${aw.id}_${pi}`;
+        const isNodeSelected = selectedNodeId === nodeKey;
+        const hasProps = !!nodeProps[nodeKey];
+
+        if (isNodeSelected) {
+          // Пульсирующий ореол выделенного узла
+          ctx.fillStyle = "rgba(59,130,246,0.2)";
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = isNodeSelected ? "#3b82f6" : hasProps ? "#fbbf24" : isSelected ? "#3b82f6" : "#fff";
+        ctx.strokeStyle = isNodeSelected ? "#1d4ed8" : st.color;
+        ctx.lineWidth = isNodeSelected ? 2.5 : 2;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, isNodeSelected ? 7 : 5, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+
+        // Иконка — если есть свойства, ставим маленький маркер
+        if (hasProps && !isNodeSelected) {
+          ctx.fillStyle = "#fbbf24";
+          ctx.beginPath();
+          ctx.arc(p.x + 6, p.y - 6, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
       });
 
       // Подпись выработки — в середине
@@ -619,7 +661,7 @@ export default function VentScheme2D() {
     }
 
     ctx.restore();
-  }, [scheme, viewport, selectedId, tool, drawingAirway, mousePos, airwayStyle]);
+  }, [scheme, viewport, selectedId, selectedNodeId, nodeProps, tool, drawingAirway, mousePos, airwayStyle]);
 
   useEffect(() => { redraw(); }, [redraw]);
 
@@ -649,8 +691,31 @@ export default function VentScheme2D() {
     }
 
     if (tool === "select") {
+      // Сначала проверяем узловые точки выработок (двойной клик ← не используем, просто клик)
+      let nodeHit: { key: string; x: number; y: number; z?: number } | null = null;
+      for (const aw of scheme.airways) {
+        for (let pi = 0; pi < aw.points.length; pi++) {
+          const pt = aw.points[pi];
+          if (Math.hypot(pt.x - w.x, pt.y - w.y) < 8) {
+            nodeHit = { key: `${aw.id}_${pi}`, x: pt.x, y: pt.y, z: pt.z };
+            break;
+          }
+        }
+        if (nodeHit) break;
+      }
+
+      if (nodeHit) {
+        // Клик по узловой точке — открываем панель узла
+        getOrCreateNode(nodeHit.key, 0, nodeHit.x, nodeHit.y, nodeHit.z);
+        setSelectedNodeId(nodeHit.key);
+        setSelectedId(null);
+        setPropPanel(null);
+        return;
+      }
+
       const hit = hitTest(w.x, w.y);
       setSelectedId(hit);
+      setSelectedNodeId(null);
       setPropPanel(hit ? (() => {
         const pos = scheme.positions.find(p => p.id === hit);
         const obj = scheme.objects.find(o => o.id === hit);
@@ -1191,6 +1256,18 @@ export default function VentScheme2D() {
               </div>
             )}
           </div>
+        )}
+
+        {/* ── Панель свойств узла ── */}
+        {selectedNodeId && nodeProps[selectedNodeId] && (
+          <NodePropertiesPanel
+            node={nodeProps[selectedNodeId]}
+            measures={nodeMeasures[selectedNodeId] ?? []}
+            pipes={nodePipes[selectedNodeId] ?? []}
+            indicators={nodeIndicators[selectedNodeId] ?? []}
+            onUpdate={patch => updateNodeProps(selectedNodeId, patch)}
+            onClose={() => setSelectedNodeId(null)}
+          />
         )}
       </div>
 
