@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import Icon from "@/components/ui/icon";
+import VentScheme3DView, { Airway3D, Position3D, PlaneInfo } from "@/components/VentScheme3DView";
 
 // ─── Типы ──────────────────────────────────────────────────────────────────────
 type ToolMode =
@@ -25,19 +26,21 @@ interface SchemeNode {
 
 interface Airway {
   id: string;
-  points: { x: number; y: number }[];
+  points: { x: number; y: number; z?: number }[];
   style: AirwayStyle;
   label?: string;
   q?: string;    // расход воздуха
   l?: string;    // длина
   s?: string;    // сечение
   color?: string;
+  z?: number;    // глубина горизонта (м)
 }
 
 interface Position {
   id: string;
   x: number;
   y: number;
+  z?: number;   // глубина горизонта (м)
   num: number;
   color: string;
   label?: string;
@@ -108,45 +111,49 @@ const INITIAL: SchemeData = {
   airways: [
     {
       id: "aw1",
-      points: [{ x: 500, y: 100 }, { x: 500, y: 700 }],
+      points: [{ x: 500, y: 100, z: 0 }, { x: 500, y: 350, z: 200 }, { x: 500, y: 700, z: 400 }],
       style: "main",
       label: "Гл. ствол",
-      q: "248",
-      l: "450",
-      s: "12.5",
+      q: "248", l: "450", s: "12.5", z: 0,
     },
     {
       id: "aw2",
-      points: [{ x: 500, y: 300 }, { x: 700, y: 450 }],
+      points: [{ x: 500, y: 300, z: 180 }, { x: 700, y: 450, z: 180 }],
       style: "branch",
-      label: "Откаточный",
-      q: "58",
-      l: "180",
+      label: "Откаточный гор.860",
+      q: "58", l: "180", z: 180,
     },
     {
       id: "aw3",
-      points: [{ x: 500, y: 500 }, { x: 300, y: 620 }],
+      points: [{ x: 500, y: 500, z: 320 }, { x: 300, y: 620, z: 320 }],
       style: "intake",
       label: "Вент. ствол",
-      q: "72",
-      l: "210",
+      q: "72", l: "210", z: 320,
     },
     {
       id: "aw4",
-      points: [{ x: 700, y: 450 }, { x: 800, y: 550 }],
+      points: [{ x: 700, y: 450, z: 180 }, { x: 800, y: 550, z: 250 }],
       style: "exhaust",
       label: "Квершлаг",
-      q: "44",
+      q: "44", z: 200,
+    },
+    {
+      id: "aw5",
+      points: [{ x: 300, y: 620, z: 320 }, { x: 200, y: 720, z: 380 }],
+      style: "tube",
+      label: "Лава 3",
+      q: "22", l: "110", z: 350,
     },
   ],
   positions: [
-    { id: "p1", x: 550, y: 178, num: 187, color: "#22c55e", label: "ВМЗ-12 Q=14.5 м³/с" },
-    { id: "p2", x: 720, y: 390, num: 188, color: "#ef4444", label: "Гор. 860м" },
+    { id: "p1", x: 550, y: 178, z: 0,   num: 187, color: "#22c55e", label: "ВМЗ-12 Q=14.5 м³/с" },
+    { id: "p2", x: 720, y: 390, z: 180, num: 188, color: "#ef4444", label: "Гор. 860м" },
+    { id: "p3", x: 280, y: 640, z: 320, num: 189, color: "#3b82f6", label: "Гор. 960м" },
   ],
   objects: [
-    { id: "o1", type: "fan",  x: 500, y: 340, angle: 0,   label: "ВОД-40",  params: "Q=248 м³/с", color: "#f59e0b" },
-    { id: "o2", type: "door", x: 500, y: 460, angle: 90,  label: "Двери",   params: "",            color: "#94a3b8" },
-    { id: "o3", type: "sensor", x: 500, y: 270, angle: 0, label: "ВМЗ-12", params: "Q=14.5 м³/с", color: "#60a5fa" },
+    { id: "o1", type: "fan",    x: 500, y: 340, angle: 0,  label: "ВОД-40",  params: "Q=248 м³/с", color: "#f59e0b" },
+    { id: "o2", type: "door",   x: 500, y: 460, angle: 90, label: "Двери",   params: "",            color: "#94a3b8" },
+    { id: "o3", type: "sensor", x: 500, y: 270, angle: 0,  label: "ВМЗ-12",  params: "Q=14.5 м³/с", color: "#60a5fa" },
   ],
 };
 
@@ -304,6 +311,10 @@ export default function VentScheme2D() {
 
   // Input для метки
   const [labelInput, setLabelInput] = useState("");
+
+  // 3D режим
+  const [show3D, setShow3D] = useState(false);
+  const [lastPlane, setLastPlane] = useState<PlaneInfo | null>(null);
 
   // ── Координаты холста → мировые ───────────────────────────────────────────
   const toWorld = (cx: number, cy: number) => ({
@@ -766,6 +777,48 @@ export default function VentScheme2D() {
     setScheme(s => ({ ...s, objects: s.objects.map(o => o.id === id ? { ...o, ...patch } : o) }));
   };
 
+  // ── Конвертация 2D схемы → 3D данные ────────────────────────────────────────
+  const to3D = (): { airways: Airway3D[]; positions: Position3D[] } => {
+    const airways3D: Airway3D[] = scheme.airways.map(aw => ({
+      id: aw.id,
+      style: aw.style,
+      label: aw.label,
+      q: aw.q,
+      l: aw.l,
+      points: aw.points.map((p, i) => ({
+        x: p.x,
+        y: aw.z !== undefined ? aw.z : (p.z ?? i * 50),  // Y = глубина
+        z: p.y,  // Z = "север" (Y в 2D плане)
+      })),
+    }));
+    const positions3D: Position3D[] = scheme.positions.map(pos => ({
+      id: pos.id,
+      x: pos.x,
+      y: pos.z ?? 0,
+      z: pos.y,
+      num: pos.num,
+      color: pos.color,
+      label: pos.label,
+    }));
+    return { airways: airways3D, positions: positions3D };
+  };
+
+  // ── Если режим 3D — рендерим 3D вид ─────────────────────────────────────────
+  if (show3D) {
+    const data3d = to3D();
+    return (
+      <VentScheme3DView
+        airways={data3d.airways}
+        positions={data3d.positions}
+        onBack={() => setShow3D(false)}
+        onSetPlane={(plane) => {
+          setLastPlane(plane);
+          setShow3D(false);
+        }}
+      />
+    );
+  }
+
   const inputCls = "w-full rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none focus:border-blue-400 transition-colors";
 
   const toolGroups: { label: string; tools: ToolMode[] }[] = [
@@ -848,6 +901,17 @@ export default function VentScheme2D() {
           <button onClick={() => setViewport({ x: 0, y: 0, scale: 1 })}
             className="h-6 px-2 rounded text-xs hover:bg-slate-100 text-slate-500">
             Сброс
+          </button>
+
+          <div className="h-5 w-px bg-slate-200" />
+
+          {/* Кнопка 3D */}
+          <button onClick={() => setShow3D(true)}
+            className="flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-all hover:opacity-90"
+            style={{ background: "#1e3a5f", color: "#fff" }}
+            title={lastPlane ? `Последний вид: ${lastPlane.label}` : "Открыть 3D-просмотр"}>
+            <Icon name="Box" size={13} />
+            {lastPlane ? `3D · ${lastPlane.label}` : "Просмотр 3D"}
           </button>
         </div>
       </div>
@@ -977,12 +1041,21 @@ export default function VentScheme2D() {
                       </div>
                     ))}
                   </div>
+                  {/* Глубина горизонта */}
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-500">Глубина горизонта, м</label>
+                    <input className={inputCls} type="number"
+                      value={selectedAirway.z ?? ""}
+                      placeholder="напр. 860"
+                      onChange={e => updateAirway(selectedAirway.id, { z: e.target.value ? parseFloat(e.target.value) : undefined })} />
+                    <p className="mt-0.5 text-xs text-slate-400">Используется в 3D-просмотре как Y-координата</p>
+                  </div>
                   {/* Цвет */}
                   <div>
                     <label className="mb-1 block text-xs font-medium text-slate-500">Цвет</label>
                     <div className="flex gap-1.5 flex-wrap">
                       {["#22c55e","#60a5fa","#34d399","#f87171","#a78bfa","#f59e0b","#1e293b"].map(c => (
-                        <button key={c} onClick={() => {/* Можно расширить */}}
+                        <button key={c} onClick={() => {}}
                           className="h-5 w-5 rounded-full border-2"
                           style={{ background: c, borderColor: AIRWAY_STYLES[selectedAirway.style].color === c ? "#3b82f6" : "transparent" }} />
                       ))}
@@ -1003,6 +1076,13 @@ export default function VentScheme2D() {
                     <label className="mb-1 block text-xs font-medium text-slate-500">Подпись</label>
                     <input className={inputCls} value={selectedPos.label || ""}
                       onChange={e => updatePosition(selectedPos.id, { label: e.target.value })} placeholder="Описание..." />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-500">Глубина горизонта, м</label>
+                    <input className={inputCls} type="number"
+                      value={selectedPos.z ?? ""}
+                      placeholder="напр. 860"
+                      onChange={e => updatePosition(selectedPos.id, { z: e.target.value ? parseFloat(e.target.value) : undefined })} />
                   </div>
                   <div>
                     <label className="mb-1 block text-xs font-medium text-slate-500">Цвет</label>
