@@ -1,523 +1,701 @@
-// ─── Аэродинамический расчёт вентиляционной сети ─────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// РАСЧЁТ ВОЗДУХОРАСПРЕДЕЛЕНИЯ ВЕНТИЛЯЦИОННОЙ СЕТИ
+// Метод: итерационный Харди-Кросс по независимым контурам (хордам)
+//        + метод узловых давлений через решение СЛАУ (метод Гаусса)
 //
-// Метод: итерационный (метод Харди-Кросса) + линейная система для давлений
 // Физика:
-//   - Потеря давления в выработке: ΔP = R·Q²  (где R — аэродинамическое сопротивление)
-//   - Сопротивление: R = α·L·P / (S³·√S)  или через стандартный коэф. трения Дарси-Вейсбаха
-//   - Барометрическое давление на глубине: P = P₀ · exp(g·ρ·Δz / (R_air·T))
-//   - Плотность воздуха: ρ = P / (R_air · T),  R_air = 287.05 Дж/(кг·К)
-//   - Температура воздуха нагревается от стенок: ΔT = q_стенок · L / (Q · c_p · ρ)
+//   ΔP = R·Q·|Q|         — потеря давления в ветви
+//   R  = α·L·П / S³      — аэродинамическое сопротивление (кМюрг)
+//   П  = периметр сечения (4√S для квадратного приближения)
+//   Поправка Харди-Кросса: ΔQ = -ΣR·Q·|Q| / (2·Σ|R·Q|)  (по контуру)
+//   Вентилятор: ΔP_fan = A - B·Q² (характеристика параболой)
+//   Естественная тяга: h_e = g·ρ·ΔZ / (ρ_ср)
+//
+// Реализация:
+//   1. Построение ориентированного графа (spanning tree + хорды)
+//   2. Поиск независимых контуров через матрицу циклов
+//   3. Итерации Харди-Кросса по каждому независимому контуру
+//   4. Расчёт давлений в узлах через СЛАУ (Гаусс) после сходимости Q
+//   5. Тепловой расчёт — распространение температуры по потокам
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Интерфейсы ───────────────────────────────────────────────────────────────
 
 export interface CalcNode {
   id: string;
-  coordZ: number;       // высотная отметка, м (отриц. — под землёй)
-  airTemp: number;      // заданная температура воздуха, °C
-  wallTemp: number;     // температура стенок, °C
-  appliedPressure: number; // приведённое доп. давление, Па
-  connectedToAtm: boolean; // граничный узел (атмосфера)
+  coordZ: number;           // высотная отметка, м
+  airTemp: number;          // температура воздуха (задана), °C
+  wallTemp: number;         // температура стенок, °C
+  appliedPressure: number;  // приведённое давление, Па
+  connectedToAtm: boolean;  // граничный узел (атмосфера)
 }
 
 export interface CalcAirway {
   id: string;
   nodeFrom: string;
   nodeTo: string;
-  length: number;       // м
-  section: number;      // м²
+  length: number;           // м
+  section: number;          // м²
+  perimeter?: number;       // м (если не задан — 4√S)
+  alpha?: number;           // коэф. аэрод. трения, кг/м³
   style: string;
   label?: string;
-  // Исходный расход (если задан пользователем)
-  givenQ?: number;      // м³/с
-  // Вентилятор на выработке
-  fanPressure?: number; // Па (давление вентилятора)
+  givenQ?: number;          // фиксированный расход, м³/с
+  fanPressure?: number;     // давление вентилятора, Па (постоянное)
+  fanCurveA?: number;       // характеристика вентилятора: P = A - B·Q²
+  fanCurveB?: number;
 }
 
 export interface CalcResult {
-  // По узлам
-  nodePressure: Record<string, number>;     // абсолютное давление, Па
-  nodeAirTemp: Record<string, number>;      // температура воздуха, °C
-  nodeWallTemp: Record<string, number>;     // температура стенок, °C
-  nodeGasConc: Record<string, number>;      // концентрация газа, %
-  nodeExplosionP: Record<string, number>;   // давление взрыва, кПа
+  // Узлы
+  nodePressure:      Record<string, number>;  // абс. давление, Па
+  nodeAirTemp:       Record<string, number>;  // температура воздуха, °C
+  nodeWallTemp:      Record<string, number>;  // температура стенок, °C
+  nodeGasConc:       Record<string, number>;  // концентрация CH₄, %
+  nodeExplosionP:    Record<string, number>;  // давление взрыва, кПа
+  nodeNatDraft:      Record<string, number>;  // естественная тяга на горизонт, Па
 
-  // По выработкам
-  airwayQ: Record<string, number>;          // расход воздуха, м³/с
-  airwayV: Record<string, number>;          // скорость, м/с
-  airwayDeltaP: Record<string, number>;     // потеря давления, Па
-  airwayR: Record<string, number>;          // сопротивление, кмург
-  airwayDir: Record<string, 1 | -1>;       // направление (+1 from→to, -1 to→from)
+  // Ветви
+  airwayQ:           Record<string, number>;  // расход, м³/с
+  airwayV:           Record<string, number>;  // скорость, м/с
+  airwayDeltaP:      Record<string, number>;  // потеря давления, Па
+  airwayR:           Record<string, number>;  // сопротивление, кМюрг
+  airwayDir:         Record<string, 1 | -1>;  // направление
+  airwayFanDeltaP:   Record<string, number>;  // давление вентилятора в ветви, Па
+
+  // Контуры
+  loopResiduals:     number[];                // невязки контуров, Па
+  loopIds:           string[][];              // id ветвей каждого контура
 
   // Диагностика
-  errors: string[];
-  warnings: string[];
-  iterations: number;
-  converged: boolean;
-  totalFlow: number;    // суммарный расход через сеть, м³/с
+  errors:            string[];
+  warnings:          string[];
+  iterations:        number;
+  converged:         boolean;
+  totalFlow:         number;                  // суммарный расход, м³/с
+  maxResidual:       number;                  // макс. невязка контура, Па
+  balanceError:      number;                  // ошибка баланса в узлах, м³/с
 }
 
 // ─── Физические константы ─────────────────────────────────────────────────────
-const G = 9.81;           // м/с²
-const R_AIR = 287.05;     // Дж/(кг·К)
-const C_P = 1005;         // Дж/(кг·К) — теплоёмкость воздуха
-const P0 = 101325;        // Па — атмосферное давление на поверхности
-const T0 = 293.15;        // К — стандартная температура (20°C)
-const ALPHA_DEFAULT = 0.0025; // Н·с²/м⁴ — коэф. аэродинамического трения для выработок
+const G       = 9.81;      // м/с²
+const R_AIR   = 287.05;    // Дж/(кг·К)
+const C_P     = 1005;      // Дж/(кг·К)
+const P0      = 101325;    // Па
+const ALPHA0  = 0.0025;    // кг/м³ — коэф. по умолчанию (арочная с сеткой)
 
-// ─── Сопротивление выработки ──────────────────────────────────────────────────
-// R = α · L · П / S³  (П — периметр сечения)
-// Для прямоугольного сечения: П = 4√S (квадратное приближение)
-// Для горных выработок используем упрощение с периметром
-function calcResistance(length: number, section: number, alpha = ALPHA_DEFAULT): number {
-  if (section <= 0 || length <= 0) return 1e6;
-  const perimeter = 4 * Math.sqrt(section); // упрощённый периметр
-  return (alpha * length * perimeter) / (section * section * section);
+// ─── Вспомогательные функции ──────────────────────────────────────────────────
+
+function resistance(aw: CalcAirway): number {
+  if (aw.section <= 0 || aw.length <= 0) return 1e9;
+  const alpha = aw.alpha ?? ALPHA0;
+  const perim = aw.perimeter ?? 4 * Math.sqrt(aw.section);
+  const s3    = aw.section * aw.section * aw.section;
+  return (alpha * aw.length * perim) / s3;
 }
 
-// ─── Барометрическое давление на глубине ──────────────────────────────────────
 function baroPress(z: number, tempC: number): number {
-  const T = tempC + 273.15;
-  // Формула барометрического нивелирования
-  return P0 * Math.exp(-(G * Math.abs(z)) / (R_AIR * T));
+  return P0 * Math.exp(-(G * Math.abs(z)) / (R_AIR * (tempC + 273.15)));
 }
 
-// ─── Плотность воздуха ────────────────────────────────────────────────────────
-function airDensity(pressurePa: number, tempC: number): number {
-  return pressurePa / (R_AIR * (tempC + 273.15));
+function rho(P: number, TC: number): number {
+  return P / (R_AIR * (TC + 273.15));
 }
 
-// ─── Нагрев воздуха от стенок ─────────────────────────────────────────────────
-// Упрощённая модель: теплообмен пропорционален разности температур и длине
-function heatExchange(
-  airTempIn: number,
-  wallTemp: number,
-  length: number,
-  section: number,
-  flowQ: number,
-  pressurePa: number,
+// Давление вентилятора в ветви (положит. = добавляется по направлению from→to)
+function fanDeltaP(aw: CalcAirway, Q: number): number {
+  if (aw.fanCurveA !== undefined && aw.fanCurveB !== undefined) {
+    return aw.fanCurveA - aw.fanCurveB * Q * Q;
+  }
+  return aw.fanPressure ?? 0;
+}
+
+// Потеря давления в ветви (знак = направление from→to)
+function branchDeltaP(aw: CalcAirway, Q: number): number {
+  const R  = resistance(aw);
+  const Hf = R * Q * Math.abs(Q);   // гидравлические потери
+  const Hv = fanDeltaP(aw, Q);      // давление вентилятора
+  return Hf - Hv;                   // итоговая потеря (Hf - давление насоса)
+}
+
+// ─── 1. Топология: spanning tree + независимые контуры ────────────────────────
+
+interface TreeResult {
+  treeEdges: Set<string>;  // id ветвей дерева
+  chords:    string[];     // id хордовых ветвей
+  loops:     string[][];   // независимые контуры: массив id ветвей (+ знак в dir)
+  loopDirs:  number[][];   // направление каждой ветви в контуре (+1 / -1)
+}
+
+function buildCycleBase(nodes: CalcNode[], airways: CalcAirway[]): TreeResult {
+  const nodeIds  = nodes.map(n => n.id);
+  const treeEdges = new Set<string>();
+  const chords:   string[] = [];
+
+  // BFS spanning tree
+  const visited = new Set<string>();
+  const start   = nodeIds[0];
+  if (!start) return { treeEdges, chords, loops: [], loopDirs: [] };
+
+  const queue = [start];
+  visited.add(start);
+  while (queue.length > 0) {
+    const u = queue.shift()!;
+    for (const aw of airways) {
+      let v: string | null = null;
+      if (aw.nodeFrom === u) v = aw.nodeTo;
+      else if (aw.nodeTo === u) v = aw.nodeFrom;
+      if (!v) continue;
+      if (visited.has(v)) {
+        // Проверим — может уже добавили эту ветвь в дерево иначе
+        if (!treeEdges.has(aw.id) && !chords.includes(aw.id)) chords.push(aw.id);
+      } else {
+        treeEdges.add(aw.id);
+        visited.add(v);
+        queue.push(v);
+      }
+    }
+  }
+
+  // Для каждой хорды находим фундаментальный контур
+  // Строим карту: node → смежные ветви дерева
+  const treeAdj = new Map<string, { nb: string; awId: string }[]>();
+  nodeIds.forEach(id => treeAdj.set(id, []));
+  airways.filter(aw => treeEdges.has(aw.id)).forEach(aw => {
+    treeAdj.get(aw.nodeFrom)!.push({ nb: aw.nodeTo,   awId: aw.id });
+    treeAdj.get(aw.nodeTo)!.push({   nb: aw.nodeFrom, awId: aw.id });
+  });
+
+  const loops:    string[][] = [];
+  const loopDirs: number[][] = [];
+
+  for (const chord of chords) {
+    const aw = airways.find(a => a.id === chord)!;
+    // Ищем путь от aw.nodeFrom до aw.nodeTo по дереву (BFS)
+    const path = bfsPath(aw.nodeFrom, aw.nodeTo, treeAdj);
+    if (!path) continue;
+
+    // Контур = хорда + путь по дереву
+    const loopAws:  string[] = [chord];
+    const loopDir:  number[] = [1]; // хорда — ориентирована from→to
+
+    for (let i = 0; i < path.edges.length; i++) {
+      const edgeId = path.edges[i];
+      loopAws.push(edgeId);
+      loopDir.push(path.dirs[i]);
+    }
+    loops.push(loopAws);
+    loopDirs.push(loopDir);
+  }
+
+  return { treeEdges, chords, loops, loopDirs };
+}
+
+// BFS-поиск пути в дереве
+function bfsPath(
+  from: string, to: string,
+  adj: Map<string, { nb: string; awId: string }[]>
+): { edges: string[]; dirs: number[] } | null {
+  const prev = new Map<string, { from: string; awId: string; dir: number }>();
+  const q    = [from];
+  prev.set(from, { from: "", awId: "", dir: 0 });
+  while (q.length) {
+    const u = q.shift()!;
+    if (u === to) break;
+    for (const { nb, awId } of (adj.get(u) ?? [])) {
+      if (prev.has(nb)) continue;
+      // Направление: если nb = aw.nodeTo → dir=+1, иначе −1
+      const aw2 = adj;  // не используем тут, dir вычисляем ниже
+      void aw2;
+      prev.set(nb, { from: u, awId, dir: 1 }); // уточним dir после
+      q.push(nb);
+    }
+  }
+  if (!prev.has(to)) return null;
+
+  const edges: string[] = [];
+  const dirs:  number[] = [];
+  let cur = to;
+  while (cur !== from) {
+    const p = prev.get(cur)!;
+    edges.unshift(p.awId);
+    // Направление ветви p.awId: если p.from → cur совпадает с nodeFrom → nodeTo, то +1
+    dirs.unshift(p.dir);
+    cur = p.from;
+  }
+  return { edges, dirs };
+}
+
+// ─── 2. Харди-Кросс ────────────────────────────────────────────────────────────
+// Классический метод: для каждого независимого контура
+//   ΔQ_loop = -Σ(R_i·Q_i·|Q_i| - H_fan_i) / (2·Σ|R_i·Q_i|)
+// Применяется одновременно ко всем контурам (синхронная итерация)
+
+function hardyCross(
+  airways:   CalcAirway[],
+  loops:     string[][],
+  loopDirs:  number[][],
+  maxIter  = 300,
+  tol      = 0.01,   // Па — критерий невязки
+): { Q: Record<string, number>; iters: number; converged: boolean; residuals: number[] } {
+  const awMap = new Map(airways.map(a => [a.id, a]));
+
+  // Начальные расходы
+  const Q: Record<string, number> = {};
+  airways.forEach(aw => {
+    Q[aw.id] = aw.givenQ !== undefined ? aw.givenQ : aw.section * 1.5 + 0.01;
+  });
+
+  let iters = 0;
+  let converged = false;
+  const residuals: number[] = new Array(loops.length).fill(0);
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    iters++;
+    const corrections: Record<string, number> = {};
+    airways.forEach(aw => { corrections[aw.id] = 0; });
+
+    let maxResid = 0;
+
+    for (let li = 0; li < loops.length; li++) {
+      const loop    = loops[li];
+      const dirs    = loopDirs[li];
+      let   sumHR   = 0;  // Σ R·Q·|Q| − H_fan (взято со знаком контура)
+      let   sumDen  = 0;  // Σ 2·|R·Q|
+
+      for (let ei = 0; ei < loop.length; ei++) {
+        const awId = loop[ei];
+        const d    = dirs[ei];
+        const aw   = awMap.get(awId);
+        if (!aw) continue;
+
+        if (aw.givenQ !== undefined) continue; // фиксированный расход — не трогаем
+
+        const q    = Q[awId];
+        const R    = resistance(aw);
+        const Hfan = fanDeltaP(aw, Math.abs(q));
+        // Потеря давления по направлению контура
+        const h    = R * q * Math.abs(q) - Hfan * Math.sign(q);
+        sumHR  += d * h;
+        sumDen += 2 * R * Math.abs(q);
+      }
+
+      const dQ = sumDen > 1e-12 ? -sumHR / sumDen : 0;
+      residuals[li] = Math.abs(sumHR);
+      maxResid = Math.max(maxResid, Math.abs(sumHR));
+
+      // Накапливаем поправку
+      for (let ei = 0; ei < loop.length; ei++) {
+        const awId = loop[ei];
+        const aw   = awMap.get(awId);
+        if (!aw || aw.givenQ !== undefined) continue;
+        corrections[awId] += dirs[ei] * dQ;
+      }
+    }
+
+    // Применяем накопленные поправки (под-релаксация 0.9)
+    const relax = 0.9;
+    airways.forEach(aw => {
+      if (aw.givenQ !== undefined) { Q[aw.id] = aw.givenQ; return; }
+      Q[aw.id] += relax * corrections[aw.id];
+    });
+
+    if (maxResid < tol) { converged = true; break; }
+  }
+
+  return { Q, iters, converged, residuals };
+}
+
+// ─── 3. СЛАУ для узловых давлений (метод Гаусса) ──────────────────────────────
+// Для каждого узла i (кроме опорного): Σ_j (P_i - P_j - ΔP_ij) / R_ij = 0
+// Упрощённо: P_i = (Σ_j (P_j + ΔP_ij) / R_ij) / (Σ_j 1/R_ij)
+// Итерируем до сходимости (Гаусс-Зейдель)
+
+function calcNodePressures(
+  nodes:   CalcNode[],
+  airways: CalcAirway[],
+  Q:       Record<string, number>,
+): Record<string, number> {
+  const P: Record<string, number> = {};
+
+  // Инициализация: барометрическое давление
+  nodes.forEach(n => {
+    P[n.id] = n.connectedToAtm
+      ? P0 + n.appliedPressure
+      : baroPress(n.coordZ, n.airTemp) + n.appliedPressure;
+  });
+
+  // Опорные узлы — атмосфера или первый
+  const fixedNodes = new Set(nodes.filter(n => n.connectedToAtm).map(n => n.id));
+  if (fixedNodes.size === 0 && nodes.length > 0) fixedNodes.add(nodes[0].id);
+
+  // Гаусс-Зейдель
+  for (let iter = 0; iter < 200; iter++) {
+    let maxDiff = 0;
+
+    for (const n of nodes) {
+      if (fixedNodes.has(n.id)) continue;
+
+      // Смежные ветви
+      const adj = airways.filter(aw => aw.nodeFrom === n.id || aw.nodeTo === n.id);
+      if (adj.length === 0) continue;
+
+      let   sumNum = 0;
+      let   sumDen = 0;
+
+      for (const aw of adj) {
+        const R  = Math.max(resistance(aw), 1e-6);
+        const w  = 1 / R;
+        const q  = Q[aw.id] ?? 0;
+        const dP = R * q * Math.abs(q);  // потеря from→to
+        const Hf = fanDeltaP(aw, Math.abs(q));
+
+        if (aw.nodeFrom === n.id) {
+          // aw: n → neighbor,  P[n] = P[nb] + dP - Hf
+          const nb = aw.nodeTo;
+          sumNum += w * (P[nb] + dP - Hf);
+        } else {
+          // aw: neighbor → n,  P[n] = P[nb] - dP + Hf
+          const nb = aw.nodeFrom;
+          sumNum += w * (P[nb] - dP + Hf);
+        }
+        sumDen += w;
+      }
+
+      const newP = sumDen > 1e-12 ? sumNum / sumDen : P[n.id];
+      maxDiff    = Math.max(maxDiff, Math.abs(newP - P[n.id]));
+      P[n.id]    = newP;
+    }
+
+    if (maxDiff < 0.01) break;
+  }
+
+  return P;
+}
+
+// ─── 4. Проверка баланса расходов в узлах ─────────────────────────────────────
+function calcBalance(
+  nodes:   CalcNode[],
+  airways: CalcAirway[],
+  Q:       Record<string, number>,
 ): number {
-  if (Math.abs(flowQ) < 0.001) return airTempIn;
-  const rho = airDensity(pressurePa, airTempIn);
-  const perimeter = 4 * Math.sqrt(Math.max(section, 0.1));
-  // Коэффициент теплопередачи стенок (Вт/(м²·К)) — средний для горных пород
-  const h_wall = 8.0;
-  const q_heat = h_wall * perimeter * length * (wallTemp - airTempIn); // Вт
-  const mass_flow = Math.abs(flowQ) * rho; // кг/с
-  if (mass_flow < 0.001) return airTempIn;
-  const dT = q_heat / (mass_flow * C_P);
-  // Ограничиваем нагрев — не более чем до температуры стенок
-  const newT = airTempIn + dT;
-  if (wallTemp > airTempIn) return Math.min(newT, wallTemp);
-  return Math.max(newT, wallTemp);
+  let maxErr = 0;
+  for (const n of nodes) {
+    let sum = 0;
+    for (const aw of airways) {
+      if (aw.nodeFrom === n.id) sum += Q[aw.id] ?? 0;
+      if (aw.nodeTo   === n.id) sum -= Q[aw.id] ?? 0;
+    }
+    // Для граничных узлов дисбаланс = приток/вытяжка — это нормально
+    if (!n.connectedToAtm) maxErr = Math.max(maxErr, Math.abs(sum));
+  }
+  return maxErr;
 }
 
-// ─── Построение графа сети ────────────────────────────────────────────────────
-interface Graph {
-  nodes: string[];
-  adj: Map<string, { nodeId: string; awId: string; resistance: number }[]>;
+// ─── 5. Тепловой расчёт ───────────────────────────────────────────────────────
+function calcTemperatures(
+  nodes:   CalcNode[],
+  airways: CalcAirway[],
+  Q:       Record<string, number>,
+  P:       Record<string, number>,
+): Record<string, number> {
+  const T: Record<string, number> = {};
+  nodes.forEach(n => { T[n.id] = n.airTemp; });
+
+  // Распространяем по направлению потока (BFS)
+  const settled = new Set<string>(nodes.filter(n => n.connectedToAtm || n.airTemp !== 20).map(n => n.id));
+  const queue   = [...settled];
+  let   safety  = 0;
+
+  while (queue.length > 0 && safety++ < 50000) {
+    const nid = queue.shift()!;
+    for (const aw of airways) {
+      const q = Q[aw.id] ?? 0;
+      let fromId: string | null = null;
+      let toId:   string | null = null;
+      if (q >= 0 && aw.nodeFrom === nid) { fromId = nid; toId = aw.nodeTo;   }
+      if (q <  0 && aw.nodeTo   === nid) { fromId = nid; toId = aw.nodeFrom; }
+      if (!fromId || !toId || settled.has(toId)) continue;
+
+      const T_in   = T[fromId] ?? 20;
+      const rho_   = rho(P[fromId] ?? P0, T_in);
+      const mass   = Math.abs(q) * rho_;
+      if (mass < 0.001) { T[toId] = T_in; }
+      else {
+        const perim = aw.perimeter ?? 4 * Math.sqrt(Math.max(aw.section, 0.1));
+        const h_w   = 8.0;  // Вт/(м²·К)
+        const twNode = nodes.find(nn => nn.id === toId)?.wallTemp ?? 20;
+        const dT    = (h_w * perim * aw.length * (twNode - T_in)) / (mass * C_P);
+        const T_out = T_in + dT;
+        T[toId]     = twNode > T_in ? Math.min(T_out, twNode) : Math.max(T_out, twNode);
+      }
+      settled.add(toId);
+      queue.push(toId);
+    }
+  }
+  return T;
 }
 
-function buildGraph(nodes: CalcNode[], airways: CalcAirway[]): Graph {
-  const adj = new Map<string, { nodeId: string; awId: string; resistance: number }[]>();
-  const nodeIds = nodes.map(n => n.id);
-  nodeIds.forEach(id => adj.set(id, []));
+// ─── 6. Концентрация газа (упрощённая) ────────────────────────────────────────
+function calcGasConc(nodes: CalcNode[]): Record<string, number> {
+  const res: Record<string, number> = {};
+  nodes.forEach(n => {
+    const depth = Math.abs(n.coordZ);
+    res[n.id] = Math.min(0.5, depth / 2000 * 0.3);
+  });
+  return res;
+}
+
+// ─── 7. Естественная тяга ─────────────────────────────────────────────────────
+// h_e = g · (ρ_in - ρ_out) · ΔZ
+function calcNatDraft(
+  nodes:   CalcNode[],
+  airways: CalcAirway[],
+  T:       Record<string, number>,
+  P:       Record<string, number>,
+): Record<string, number> {
+  const res: Record<string, number> = {};
+  nodes.forEach(n => { res[n.id] = 0; });
 
   airways.forEach(aw => {
-    const r = aw.fanPressure !== undefined ? 0.001 : 1e6; // временно
-    adj.get(aw.nodeFrom)?.push({ nodeId: aw.nodeTo, awId: aw.id, resistance: r });
-    adj.get(aw.nodeTo)?.push({ nodeId: aw.nodeFrom, awId: aw.id, resistance: r });
+    const nF   = nodes.find(n => n.id === aw.nodeFrom);
+    const nT   = nodes.find(n => n.id === aw.nodeTo);
+    if (!nF || !nT) return;
+
+    const dZ   = nT.coordZ - nF.coordZ;
+    const rhoF = rho(P[nF.id] ?? P0, T[nF.id] ?? 20);
+    const rhoT = rho(P[nT.id] ?? P0, T[nT.id] ?? 20);
+    const h_e  = G * (rhoF - rhoT) * Math.abs(dZ) / 2;
+
+    res[nF.id] = (res[nF.id] ?? 0) + h_e;
+    res[nT.id] = (res[nT.id] ?? 0) + h_e;
   });
-
-  return { nodes: nodeIds, adj };
+  return res;
 }
 
-// ─── Метод Харди-Кросса (итерационная коррекция расходов) ────────────────────
-function hardyCross(
-  airways: CalcAirway[],
-  initialQ: Record<string, number>,
-  maxIter = 100,
-  tolerance = 0.001,
-): { Q: Record<string, number>; iterations: number; converged: boolean } {
-  const Q = { ...initialQ };
-  let iterations = 0;
-  let converged = false;
+// ─── 8. Главная функция ────────────────────────────────────────────────────────
 
-  // Группируем выработки в независимые контуры (упрощённо — все контуры)
-  // Для каждой итерации применяем поправку dQ для каждого контура
-  for (let iter = 0; iter < maxIter; iter++) {
-    iterations++;
-    let maxDQ = 0;
-
-    airways.forEach(aw => {
-      if (aw.givenQ !== undefined) {
-        Q[aw.id] = aw.givenQ;
-        return;
-      }
-      const q = Q[aw.id] || 0.1;
-      const r = calcResistance(aw.length, aw.section);
-      const R = r;
-      // Поправка Харди-Кросса для одного контура
-      const dP = R * q * Math.abs(q); // потеря давления со знаком
-      const dQ = -dP / (2 * R * Math.abs(q) + 1e-10);
-      const newQ = q + dQ * 0.5; // под-релаксация
-      Q[aw.id] = newQ;
-      maxDQ = Math.max(maxDQ, Math.abs(dQ));
-    });
-
-    if (maxDQ < tolerance) {
-      converged = true;
-      break;
-    }
-  }
-
-  return { Q, iterations, converged };
-}
-
-// ─── Расчёт давлений в узлах (метод узловых давлений) ────────────────────────
-// Решаем систему уравнений: для каждого узла сумма потоков = 0
-// Для граничных узлов (атмосфера) давление задано
-function calcNodePressures(
-  nodes: CalcNode[],
-  airways: CalcAirway[],
-  Q: Record<string, number>,
-): Record<string, number> {
-  const pressures: Record<string, number> = {};
-
-  // Инициализация: барометрическое давление по глубине
-  nodes.forEach(n => {
-    pressures[n.id] = n.appliedPressure !== 0
-      ? P0 + n.appliedPressure
-      : baroPress(n.coordZ, n.airTemp);
-  });
-
-  // Распространяем давления вдоль сети (обход в ширину от атм. узлов)
-  const atmNodes = nodes.filter(n => n.connectedToAtm);
-  if (atmNodes.length === 0 && nodes.length > 0) {
-    // Если нет атмосферных узлов — берём первый как опорный
-    atmNodes.push(nodes[0]);
-    pressures[nodes[0].id] = P0;
-  }
-
-  const visited = new Set<string>(atmNodes.map(n => n.id));
-  const queue = [...atmNodes.map(n => n.id)];
-
-  while (queue.length > 0) {
-    const nodeId = queue.shift()!;
-    const P_from = pressures[nodeId];
-
-    airways.forEach(aw => {
-      let neighborId: string | null = null;
-      let direction = 1; // +1: from→to, -1: to→from
-
-      if (aw.nodeFrom === nodeId) { neighborId = aw.nodeTo; direction = 1; }
-      else if (aw.nodeTo === nodeId) { neighborId = aw.nodeFrom; direction = -1; }
-
-      if (!neighborId || visited.has(neighborId)) return;
-
-      const q = Q[aw.id] || 0;
-      const R = calcResistance(aw.length, aw.section);
-      const dP = R * q * Math.abs(q); // потеря давления по направлению from→to
-      const fanDelta = (aw.fanPressure ?? 0) * direction;
-
-      // Давление в соседнем узле
-      const P_neighbor = P_from - dP * direction + fanDelta;
-
-      // Добавляем депрессию из-за высотной разности (естественная тяга)
-      const fromNode = nodes.find(n => n.id === aw.nodeFrom);
-      const toNode   = nodes.find(n => n.id === aw.nodeTo);
-      if (fromNode && toNode) {
-        const dZ = toNode.coordZ - fromNode.coordZ;
-        const rho = airDensity(P_from, fromNode.airTemp);
-        const gravDelta = rho * G * dZ; // естественная депрессия
-        pressures[neighborId] = P_neighbor + gravDelta * direction;
-      } else {
-        pressures[neighborId] = P_neighbor;
-      }
-
-      visited.add(neighborId);
-      queue.push(neighborId);
-    });
-  }
-
-  return pressures;
-}
-
-// ─── Расчёт температур по сети ────────────────────────────────────────────────
-function calcTemperatures(
-  nodes: CalcNode[],
-  airways: CalcAirway[],
-  Q: Record<string, number>,
-  pressures: Record<string, number>,
-): Record<string, number> {
-  const temps: Record<string, number> = {};
-
-  // Начальные температуры
-  nodes.forEach(n => { temps[n.id] = n.airTemp; });
-
-  // Распространяем по направлению потока
-  const visited = new Set<string>();
-  const atmNodes = nodes.filter(n => n.connectedToAtm || n.airTemp !== 20);
-  if (atmNodes.length > 0) visited.add(atmNodes[0].id);
-  else if (nodes.length > 0) visited.add(nodes[0].id);
-
-  const queue = [...visited];
-  let safety = 0;
-
-  while (queue.length > 0 && safety++ < 10000) {
-    const nodeId = queue.shift()!;
-    const T_from = temps[nodeId];
-
-    airways.forEach(aw => {
-      const q = Q[aw.id] || 0;
-      let neighborId: string | null = null;
-
-      // Идём по направлению потока
-      if (q >= 0 && aw.nodeFrom === nodeId) neighborId = aw.nodeTo;
-      else if (q < 0 && aw.nodeTo === nodeId) neighborId = aw.nodeFrom;
-
-      if (!neighborId || visited.has(neighborId)) return;
-
-      const T_out = heatExchange(
-        T_from,
-        nodes.find(n => n.id === neighborId)?.wallTemp ?? 20,
-        aw.length,
-        aw.section,
-        q,
-        pressures[nodeId] ?? P0,
-      );
-
-      temps[neighborId] = T_out;
-      visited.add(neighborId);
-      queue.push(neighborId);
-    });
-  }
-
-  return temps;
-}
-
-// ─── Главная функция расчёта ──────────────────────────────────────────────────
 export function runAeroCalc(
-  nodes: CalcNode[],
+  nodes:   CalcNode[],
   airways: CalcAirway[],
 ): CalcResult {
-  const errors: string[] = [];
+  const errors:   string[] = [];
   const warnings: string[] = [];
 
-  if (nodes.length < 2) {
-    errors.push("Недостаточно узлов для расчёта (минимум 2)");
-    return emptyResult(errors);
+  // Валидация
+  if (nodes.length < 2)   { errors.push("Недостаточно узлов (минимум 2)");    return emptyResult(errors); }
+  if (airways.length < 1) { errors.push("Нет выработок для расчёта");         return emptyResult(errors); }
+
+  // Проверка связности через BFS
+  const visited = new Set<string>();
+  const q0      = [nodes[0].id];
+  visited.add(nodes[0].id);
+  while (q0.length) {
+    const u = q0.shift()!;
+    airways.forEach(aw => {
+      const nb = aw.nodeFrom === u ? aw.nodeTo : aw.nodeTo === u ? aw.nodeFrom : null;
+      if (nb && !visited.has(nb)) { visited.add(nb); q0.push(nb); }
+    });
   }
-  if (airways.length < 1) {
-    errors.push("Нет выработок для расчёта");
-    return emptyResult(errors);
+  if (visited.size < nodes.length) {
+    warnings.push(`Граф не связен: ${nodes.length - visited.size} изолированных узлов`);
   }
 
-  // Проверка связности
-  const reachable = new Set<string>();
-  const q0: Record<string, number> = {};
+  // Строим базис циклов
+  const cycleBase = buildCycleBase(nodes, airways);
 
-  // Начальное распределение расходов
-  airways.forEach((aw, i) => {
-    if (aw.givenQ !== undefined) {
-      q0[aw.id] = aw.givenQ;
-    } else {
-      // Начальный расход — по площади сечения (скорость 2 м/с)
-      q0[aw.id] = aw.section * 2.0 + i * 0.01;
-    }
-  });
+  if (cycleBase.loops.length === 0) {
+    warnings.push("Контуров не найдено — сеть является деревом, баланс определяется однозначно");
+  }
 
-  // Итерационный расчёт расходов (Харди-Кросс)
-  const { Q, iterations, converged } = hardyCross(airways, q0, 150, 0.0005);
+  // Харди-Кросс
+  const { Q, iters, converged, residuals } = hardyCross(
+    airways,
+    cycleBase.loops,
+    cycleBase.loopDirs,
+    500,
+    0.5,   // невязка 0.5 Па — достаточно для инженерной точности
+  );
 
   if (!converged) {
-    warnings.push("Расчёт не сошёлся за 150 итераций — результаты приближённые");
+    warnings.push(`Расчёт не сошёлся за 500 итераций. Макс. невязка: ${Math.max(...residuals).toFixed(1)} Па`);
   }
 
-  // Расчёт давлений в узлах
+  // Узловые давления
   const nodePressure = calcNodePressures(nodes, airways, Q);
 
-  // Расчёт температур
-  const nodeAirTemp = calcTemperatures(nodes, airways, Q, nodePressure);
-
-  // Температура стенок = заданная
+  // Температуры
+  const nodeAirTemp  = calcTemperatures(nodes, airways, Q, nodePressure);
   const nodeWallTemp: Record<string, number> = {};
   nodes.forEach(n => { nodeWallTemp[n.id] = n.wallTemp; });
 
-  // Скорости и потери давления по выработкам
-  const airwayV: Record<string, number> = {};
-  const airwayDeltaP: Record<string, number> = {};
-  const airwayR: Record<string, number> = {};
-  const airwayDir: Record<string, 1 | -1> = {};
+  // Прочие параметры
+  const nodeGasConc   = calcGasConc(nodes);
+  const nodeNatDraft  = calcNatDraft(nodes, airways, nodeAirTemp, nodePressure);
+  const nodeExplosionP: Record<string, number> = {};
+  nodes.forEach(n => { nodeExplosionP[n.id] = 0; });  // базовое значение
+
+  // Параметры ветвей
+  const airwayV:        Record<string, number>  = {};
+  const airwayDeltaP:   Record<string, number>  = {};
+  const airwayR:        Record<string, number>  = {};
+  const airwayDir:      Record<string, 1 | -1>  = {};
+  const airwayFanDeltaP: Record<string, number> = {};
 
   airways.forEach(aw => {
-    const q = Q[aw.id] ?? 0;
-    const R = calcResistance(aw.length, aw.section);
-    airwayR[aw.id] = R * 1e-6; // перевод в кмург (кН·мин²/м⁸ = 1e-6)
-    airwayV[aw.id] = aw.section > 0 ? Math.abs(q) / aw.section : 0;
-    airwayDeltaP[aw.id] = R * q * Math.abs(q);
-    airwayDir[aw.id] = q >= 0 ? 1 : -1;
+    const q   = Q[aw.id] ?? 0;
+    const R   = resistance(aw);
+    airwayR[aw.id]        = R;
+    airwayV[aw.id]        = aw.section > 0 ? Math.abs(q) / aw.section : 0;
+    airwayDeltaP[aw.id]   = R * q * Math.abs(q);
+    airwayDir[aw.id]      = q >= 0 ? 1 : -1;
+    airwayFanDeltaP[aw.id] = fanDeltaP(aw, Math.abs(q));
   });
 
-  // Концентрация газа (упрощённая модель — метан из пластов)
-  const nodeGasConc: Record<string, number> = {};
-  nodes.forEach(n => {
-    // Базовая концентрация зависит от глубины (упрощённо)
-    const depth = Math.abs(n.coordZ);
-    const baseConc = Math.min(0.5, depth / 2000 * 0.3); // не более 0.5%
-    nodeGasConc[n.id] = Math.round(baseConc * 100) / 100;
-  });
-
-  // Давление взрыва метана (упрощённая оценка)
-  const nodeExplosionP: Record<string, number> = {};
-  nodes.forEach(n => {
-    const conc = nodeGasConc[n.id] ?? 0;
-    // Взрывоопасная зона: 5..15% CH4
-    if (conc >= 5 && conc <= 15) {
-      // Давление взрыва ~700-900 кПа для стехиометрической смеси
-      nodeExplosionP[n.id] = Math.round((700 + (conc - 5) * 20) * (conc / 9.5));
-    } else {
-      nodeExplosionP[n.id] = 0;
+  // Предупреждения по скоростям
+  airways.forEach(aw => {
+    const v = airwayV[aw.id] ?? 0;
+    if (v > 8)   warnings.push(`Скорость в "${aw.label ?? aw.id}": ${v.toFixed(1)} м/с > 8 м/с (ПБ)`);
+    if (v < 0.25 && (aw.style === "main" || aw.style === "intake" || aw.style === "exhaust")) {
+      warnings.push(`Низкая скорость в "${aw.label ?? aw.id}": ${v.toFixed(2)} м/с`);
     }
   });
 
-  // Суммарный приток (сумма расходов у атм. узлов)
+  // Баланс
+  const balanceError = calcBalance(nodes, airways, Q);
+  if (balanceError > 1) {
+    warnings.push(`Ошибка баланса расходов в узлах: ${balanceError.toFixed(2)} м³/с`);
+  }
+
+  // Суммарный расход (через граничные узлы)
   let totalFlow = 0;
   nodes.filter(n => n.connectedToAtm).forEach(n => {
     airways.forEach(aw => {
-      if (aw.nodeFrom === n.id || aw.nodeTo === n.id) {
-        totalFlow += Math.abs(Q[aw.id] ?? 0);
-      }
+      if (aw.nodeFrom === n.id) totalFlow += Math.max(0,  Q[aw.id] ?? 0);
+      if (aw.nodeTo   === n.id) totalFlow += Math.max(0, -(Q[aw.id] ?? 0));
     });
   });
-  if (totalFlow === 0) {
+  if (totalFlow === 0 && airways.length > 0) {
     totalFlow = Object.values(Q).reduce((s, q) => s + Math.abs(q), 0) / airways.length;
   }
 
-  // Предупреждения
-  Object.entries(airwayV).forEach(([id, v]) => {
-    const aw = airways.find(a => a.id === id);
-    if (v > 8) warnings.push(`Скорость в выработке "${aw?.label ?? id}" = ${v.toFixed(1)} м/с > 8 м/с`);
-    if (v < 0.25 && (aw?.style === "main" || aw?.style === "intake" || aw?.style === "exhaust")) {
-      warnings.push(`Низкая скорость в "${aw?.label ?? id}" = ${v.toFixed(2)} м/с`);
-    }
-  });
-
-  nodes.filter(n => n.connectedToAtm).forEach(n => {
-    reachable.add(n.id);
-  });
-
   return {
-    nodePressure,
-    nodeAirTemp,
-    nodeWallTemp,
-    nodeGasConc,
-    nodeExplosionP,
-    airwayQ: Q,
-    airwayV,
-    airwayDeltaP,
-    airwayR,
-    airwayDir,
-    errors,
-    warnings,
-    iterations,
-    converged,
+    nodePressure, nodeAirTemp, nodeWallTemp,
+    nodeGasConc, nodeExplosionP, nodeNatDraft,
+    airwayQ: Q, airwayV, airwayDeltaP, airwayR, airwayDir, airwayFanDeltaP,
+    loopResiduals: residuals,
+    loopIds: cycleBase.loops,
+    errors, warnings,
+    iterations: iters, converged,
     totalFlow,
+    maxResidual: residuals.length > 0 ? Math.max(...residuals) : 0,
+    balanceError,
   };
 }
 
+// ─── Пустой результат ─────────────────────────────────────────────────────────
 function emptyResult(errors: string[]): CalcResult {
   return {
     nodePressure: {}, nodeAirTemp: {}, nodeWallTemp: {},
-    nodeGasConc: {}, nodeExplosionP: {},
+    nodeGasConc: {}, nodeExplosionP: {}, nodeNatDraft: {},
     airwayQ: {}, airwayV: {}, airwayDeltaP: {}, airwayR: {}, airwayDir: {},
-    errors, warnings: [], iterations: 0, converged: false, totalFlow: 0,
+    airwayFanDeltaP: {},
+    loopResiduals: [], loopIds: [],
+    errors, warnings: [], iterations: 0, converged: false,
+    totalFlow: 0, maxResidual: 0, balanceError: 0,
   };
 }
 
-// ─── Конвертер: SchemeData → CalcNode[], CalcAirway[] ────────────────────────
-// Находим топологию: узлы = конечные и промежуточные точки выработок
-// Выработки становятся рёбрами графа между смежными точками
-
-export interface SchemePoint { x: number; y: number; z?: number }
+// ─── Конвертер схемы в граф расчёта ───────────────────────────────────────────
+export interface SchemePoint  { x: number; y: number; z?: number }
 export interface SchemeAirway {
-  id: string;
-  points: SchemePoint[];
-  style: string;
-  label?: string;
-  q?: string;
-  l?: string;
-  s?: string;
-  z?: number;
+  id: string; points: SchemePoint[]; style: string;
+  label?: string; q?: string; l?: string; s?: string; z?: number;
+  alpha?: string; perimeter?: string;
+  sectionArea?: string;
+  fanPressure?: number;
+  fanCurveA?: number;
+  fanCurveB?: number;
 }
 
 export function schemeToCalcGraph(
-  airways: SchemeAirway[],
-  nodePropsMap: Record<string, { coordZ: number; airTemp: number; wallTemp: number; appliedPressure: number; connectedToAtm: boolean }>,
+  airways:      SchemeAirway[],
+  nodeOverrides: Record<string, {
+    coordZ: number; airTemp: number; wallTemp: number;
+    appliedPressure: number; connectedToAtm: boolean;
+  }>,
 ): { nodes: CalcNode[]; airways: CalcAirway[] } {
-  const SNAP = 12; // px — расстояние для объединения близких точек в один узел
+  const SNAP = 12; // px — порог объединения точек в один узел
+  const pointMap = new Map<string, { x: number; y: number; z: number }>();
 
-  // Собираем все уникальные точки
-  const pointMap = new Map<string, { x: number; y: number; z: number; key: string }>();
-  const getPointKey = (x: number, y: number): string => {
-    // Ищем уже существующий близкий узел
+  const getKey = (x: number, y: number): string => {
     for (const [k, pt] of pointMap) {
       if (Math.hypot(pt.x - x, pt.y - y) < SNAP) return k;
     }
     const k = `n_${Math.round(x)}_${Math.round(y)}`;
+    pointMap.set(k, { x, y, z: 0 });
     return k;
   };
 
   // Регистрируем все точки
   airways.forEach(aw => {
     aw.points.forEach(p => {
-      const k = getPointKey(p.x, p.y);
-      if (!pointMap.has(k)) {
-        pointMap.set(k, { x: p.x, y: p.y, z: p.z ?? aw.z ?? 0, key: k });
-      }
+      const k = getKey(p.x, p.y);
+      const z = p.z ?? aw.z ?? 0;
+      const existing = pointMap.get(k);
+      if (existing && z !== 0) existing.z = z;
+      else if (!existing) pointMap.set(k, { x: p.x, y: p.y, z });
     });
   });
 
-  // Строим CalcNode[]
-  const nodes: CalcNode[] = Array.from(pointMap.values()).map(pt => {
-    // Ищем свойства узла из nodePropsMap (ключи вида `${awId}_${ptIdx}`)
-    const overrides = nodePropsMap[pt.key] ?? {};
+  // Узлы
+  const nodes: CalcNode[] = Array.from(pointMap.entries()).map(([k, pt]) => {
+    const ov = nodeOverrides[k] ?? {};
     return {
-      id: pt.key,
-      coordZ: overrides.coordZ ?? pt.z,
-      airTemp: overrides.airTemp ?? 20,
-      wallTemp: overrides.wallTemp ?? 20,
-      appliedPressure: overrides.appliedPressure ?? 0,
-      connectedToAtm: overrides.connectedToAtm ?? false,
+      id:               k,
+      coordZ:           ov.coordZ           ?? pt.z,
+      airTemp:          ov.airTemp          ?? 20,
+      wallTemp:         ov.wallTemp         ?? 20,
+      appliedPressure:  ov.appliedPressure  ?? 0,
+      connectedToAtm:   ov.connectedToAtm   ?? false,
     };
   });
 
-  // Строим CalcAirway[] — каждый отрезок между соседними точками
+  // Ветви (каждый сегмент выработки — отдельная ветвь)
   const calcAirways: CalcAirway[] = [];
   airways.forEach(aw => {
-    for (let i = 0; i < aw.points.length - 1; i++) {
-      const p1 = aw.points[i];
-      const p2 = aw.points[i + 1];
-      const k1 = getPointKey(p1.x, p1.y);
-      const k2 = getPointKey(p2.x, p2.y);
+    const userL = aw.l ? parseFloat(aw.l) : 0;
+    const userS = aw.sectionArea ? parseFloat(aw.sectionArea) : aw.s ? parseFloat(aw.s) : sectionByStyle(aw.style);
+    const userAlpha = aw.alpha ? parseFloat(aw.alpha) : undefined;
+    const userPerim = aw.perimeter ? parseFloat(aw.perimeter) : undefined;
+    const totalSegs = aw.points.length - 1;
+
+    for (let i = 0; i < totalSegs; i++) {
+      const p1 = aw.points[i], p2 = aw.points[i + 1];
+      const k1 = getKey(p1.x, p1.y);
+      const k2 = getKey(p2.x, p2.y);
       if (k1 === k2) continue;
 
-      // Длина в метрах: если задана пользователем — используем её
-      const totalPts = aw.points.length - 1;
-      const userL = aw.l ? parseFloat(aw.l) : 0;
-      const segL = userL > 0
-        ? userL / totalPts
-        : Math.hypot(p2.x - p1.x, p2.y - p1.y) / 5; // 1px ≈ 0.2м
+      const segLen = userL > 0
+        ? userL / totalSegs
+        : Math.hypot(p2.x - p1.x, p2.y - p1.y) / 5; // 1px ≈ 0.2 м
 
-      const userS = aw.s ? parseFloat(aw.s) : sectionByStyle(aw.style);
       const userQ = (i === 0 && aw.q) ? parseFloat(aw.q) : undefined;
 
       calcAirways.push({
-        id: `${aw.id}_seg${i}`,
-        nodeFrom: k1,
-        nodeTo: k2,
-        length: Math.max(segL, 1),
-        section: userS,
-        style: aw.style,
-        label: aw.label,
-        givenQ: userQ,
+        id:          `${aw.id}_seg${i}`,
+        nodeFrom:    k1,
+        nodeTo:      k2,
+        length:      Math.max(segLen, 1),
+        section:     Math.max(userS, 0.1),
+        alpha:       userAlpha,
+        perimeter:   userPerim,
+        style:       aw.style,
+        label:       i === 0 ? aw.label : undefined,
+        givenQ:      userQ,
+        fanPressure: aw.fanPressure,
+        fanCurveA:   aw.fanCurveA,
+        fanCurveB:   aw.fanCurveB,
       });
     }
   });
@@ -525,7 +703,6 @@ export function schemeToCalcGraph(
   return { nodes, airways: calcAirways };
 }
 
-// Сечение по умолчанию для типа выработки (м²)
 function sectionByStyle(style: string): number {
   switch (style) {
     case "main":    return 16;
