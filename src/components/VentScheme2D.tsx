@@ -8,6 +8,7 @@ import NodePropertiesPanel, {
 } from "@/components/NodePropertiesPanel";
 import AeroCalcPanel from "@/components/AeroCalcPanel";
 import { runAeroCalc, schemeToCalcGraph, CalcResult, CalcNode, CalcAirway } from "@/lib/aeroCalc";
+import AirwayPropPanel from "@/components/AirwayPropPanel";
 
 // ─── Типы ──────────────────────────────────────────────────────────────────────
 type ToolMode =
@@ -41,6 +42,29 @@ interface Airway {
   s?: string;    // сечение
   color?: string;
   z?: number;    // глубина горизонта (м)
+  // Вентиляция
+  ventType?: string;          // тип выработки: ВНС, ВОД, Штрек...
+  sectionShape?: string;      // поперечное сечение: Арочное, Прямоугольное...
+  sectionArea?: string;       // площадь, м²
+  sectionManual?: boolean;    // задаётся вручную
+  perimeter?: string;         // периметр, м
+  lengthManual?: boolean;     // длина задаётся вручную
+  aerResistMode?: string;     // как задаётся сопр.: Проектными данными, Вручную
+  surface?: string;           // поверхность (тип крепи)
+  alpha?: string;             // коэф-т α, кг/м³
+  vMaxManual?: boolean;       // V max задаётся вручную
+  vMax?: string;              // V max, м/с
+  isVertical?: boolean;
+  isDashed?: boolean;
+  appearYear?: string;
+  appearMonth?: string;
+  appearDay?: string;
+  disappearYear?: string;
+  disappearMonth?: string;
+  disappearDay?: string;
+  borderWidth?: string;
+  borderThick?: string;
+  layerName?: string;
 }
 
 interface Position {
@@ -1294,264 +1318,36 @@ export default function VentScheme2D() {
         </div>
 
         {/* Правая панель свойств */}
-        {propPanel && (
-          <div className="flex w-64 flex-shrink-0 flex-col border-l border-slate-200 bg-white">
-            {/* Заголовок с дропдауном «Свойства» */}
-            <div className="flex flex-shrink-0 items-center gap-1 border-b border-slate-100 px-2 py-1.5"
-              style={{ background: "#f8fafc" }}>
-              <Icon name="ChevronLeft" size={11} className="text-slate-400" />
-              <select className="flex-1 bg-transparent text-xs font-semibold text-slate-600 outline-none cursor-pointer">
-                <option>Свойства</option>
-              </select>
-              <button onClick={() => { setPropPanel(null); setSelectedId(null); }} className="text-slate-300 hover:text-slate-500 ml-1">
-                <Icon name="X" size={13} />
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto">
-              {/* ── Свойства выработки (ветви) ── */}
-              {selectedAirway && (() => {
-                const aw = selectedAirway;
-                return (
-                  <div className="p-3 space-y-0">
-                    {/* Общие свойства */}
-                    <p className="text-xs font-semibold text-slate-700 mb-2 mt-1">Общие свойства</p>
-
-                    {/* Название */}
-                    <div className="flex items-center gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500">Название:</span>
-                      <input className={inputCls} value={aw.label || ""}
-                        onChange={e => updateAirway(aw.id, { label: e.target.value })}
-                        placeholder="напр. ВНС 810/860м" />
-                    </div>
-
-                    {/* Номер */}
-                    <div className="flex items-center gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500">Номер:</span>
-                      <input className={inputCls} value={aw.z?.toString() || ""}
-                        onChange={e => updateAirway(aw.id, { z: e.target.value ? parseFloat(e.target.value) : undefined })}
-                        placeholder="" />
-                    </div>
-
-                    {/* Ширина */}
-                    <div className="flex items-center gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500">Ширина:</span>
-                      <input className={inputCls} type="number" step="0.1"
-                        value={aw.s || ""}
-                        onChange={e => updateAirway(aw.id, { s: e.target.value })}
-                        placeholder="" />
-                      <span className="text-xs text-slate-400 flex-shrink-0">мм</span>
-                    </div>
-
-                    {/* Граница */}
-                    <div className="flex items-center gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500">Граница:</span>
-                      <input className={inputCls} type="number" step="0.1"
-                        defaultValue="0.2"
-                        placeholder="" />
-                      <span className="text-xs text-slate-400 flex-shrink-0">мм</span>
-                    </div>
-
-                    {/* Слой */}
-                    <div className="flex items-center gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500">Слой:</span>
-                      <select className={inputCls} value={aw.style}
-                        onChange={e => updateAirway(aw.id, { style: e.target.value as AirwayStyle })}>
-                        <option value="main">Главный ствол</option>
-                        <option value="branch">Участковая</option>
-                        <option value="intake">Свежая струя</option>
-                        <option value="exhaust">Исходящая</option>
-                        <option value="tube">Труба/Лава</option>
-                      </select>
-                    </div>
-
-                    {/* Появление */}
-                    <div className="flex items-start gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500 mt-1">Появление:</span>
-                      <div className="flex flex-1 gap-1 flex-wrap">
-                        <input className={`${inputCls} w-14`} placeholder="Год" type="number" min="1900" max="2100" defaultValue="2025" />
-                        <select className={`${inputCls} flex-1`} defaultValue="Ноябрь">
-                          {["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"].map(m => (
-                            <option key={m}>{m}</option>
-                          ))}
-                        </select>
-                        <input className={`${inputCls} w-8`} placeholder="д" type="number" min="1" max="31" defaultValue="1" />
-                        <button className="rounded border border-slate-200 px-1.5 text-slate-400 hover:bg-slate-50 text-xs">
-                          <Icon name="Trash2" size={10} />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Исчезновение */}
-                    <div className="flex items-start gap-1 mb-2">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500 mt-1">Исчезновение:</span>
-                      <div className="flex flex-1 gap-1 flex-wrap">
-                        <input className={`${inputCls} w-14`} placeholder="Год" type="number" />
-                        <select className={`${inputCls} flex-1`}>
-                          <option value="">Месяц</option>
-                          {["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"].map(m => (
-                            <option key={m}>{m}</option>
-                          ))}
-                        </select>
-                        <input className={`${inputCls} w-8`} placeholder="д" type="number" />
-                        <button className="rounded border border-slate-200 px-1.5 text-slate-400 hover:bg-slate-50 text-xs">
-                          <Icon name="Trash2" size={10} />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Чекбоксы */}
-                    <div className="space-y-1.5 mb-3">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" className="rounded" />
-                        <span className="text-xs text-slate-600">Вертикальная выработка (ходок)</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" className="rounded" />
-                        <span className="text-xs text-slate-600">Пунктирная граница</span>
-                      </label>
-                    </div>
-
-                    <div className="h-px bg-slate-100 my-2" />
-
-                    {/* Аэродинамика */}
-                    <p className="text-xs font-semibold text-slate-700 mb-2">Аэродинамика</p>
-
-                    <div className="flex items-center gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500">L, м:</span>
-                      <input className={inputCls} type="number" value={aw.l || ""}
-                        onChange={e => updateAirway(aw.id, { l: e.target.value })} placeholder="Длина" />
-                    </div>
-                    <div className="flex items-center gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500">S, м²:</span>
-                      <input className={inputCls} type="number" step="0.1" value={aw.s || ""}
-                        onChange={e => updateAirway(aw.id, { s: e.target.value })} placeholder="Сечение" />
-                    </div>
-                    <div className="flex items-center gap-1 mb-1.5">
-                      <span className="w-20 flex-shrink-0 text-xs text-slate-500">Q, м³/с:</span>
-                      <input className={inputCls} type="number" step="0.1" value={aw.q || ""}
-                        onChange={e => updateAirway(aw.id, { q: e.target.value })} placeholder="Расход" />
-                    </div>
-
-                    {/* Расчётные данные */}
-                    {calcResult && (() => {
-                      const segKey = `${aw.id}_seg0`;
-                      const cq = calcResult.airwayQ[segKey];
-                      const cv = calcResult.airwayV[segKey];
-                      const cdp = calcResult.airwayDeltaP[segKey];
-                      const cr = calcResult.airwayR[segKey];
-                      if (cq === undefined) return null;
-                      return (
-                        <>
-                          <div className="h-px bg-slate-100 my-2" />
-                          <p className="text-xs font-bold text-slate-700 mb-2">Вычисленные параметры</p>
-                          {[
-                            { label: "Расход Q:", value: `${Math.abs(cq).toFixed(2)} м³/с` },
-                            { label: "Скорость v:", value: `${(cv??0).toFixed(2)} м/с` },
-                            { label: "Потеря ΔP:", value: `${Math.round(Math.abs(cdp??0))} Па` },
-                            { label: "Сопр. R:", value: `${(cr??0).toExponential(2)} кмург` },
-                            { label: "Направление:", value: calcResult.airwayDir[segKey] === 1 ? "→ прямое" : "← обратное" },
-                          ].map(row => (
-                            <div key={row.label} className="flex items-center justify-between mb-1">
-                              <span className="text-xs text-slate-400">{row.label}</span>
-                              <span className="font-mono text-xs font-semibold text-slate-700">{row.value}</span>
-                            </div>
-                          ))}
-                        </>
-                      );
-                    })()}
-                  </div>
-                );
-              })()}
-
-              {/* Свойства позиции */}
-              {selectedPos && (
-                <div className="p-3 space-y-3">
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-500">Номер</label>
-                    <input className={inputCls} type="number" value={selectedPos.num}
-                      onChange={e => updatePosition(selectedPos.id, { num: parseInt(e.target.value) || 0 })} />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-500">Подпись</label>
-                    <input className={inputCls} value={selectedPos.label || ""}
-                      onChange={e => updatePosition(selectedPos.id, { label: e.target.value })} placeholder="Описание..." />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-500">Глубина горизонта, м</label>
-                    <input className={inputCls} type="number"
-                      value={selectedPos.z ?? ""}
-                      placeholder="напр. 860"
-                      onChange={e => updatePosition(selectedPos.id, { z: e.target.value ? parseFloat(e.target.value) : undefined })} />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-500">Цвет</label>
-                    <div className="flex gap-1.5 flex-wrap">
-                      {POSITION_COLORS.map(c => (
-                        <button key={c} onClick={() => updatePosition(selectedPos.id, { color: c })}
-                          className="h-6 w-6 rounded-full border-2 transition-all"
-                          style={{ background: c, borderColor: selectedPos.color === c ? "#3b82f6" : "transparent" }} />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Свойства объекта */}
-              {selectedObj && (
-                <div className="p-3 space-y-3">
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-500">Название</label>
-                    <input className={inputCls} value={selectedObj.label || ""}
-                      onChange={e => updateObject(selectedObj.id, { label: e.target.value })} />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-500">Параметры</label>
-                    <input className={inputCls} value={selectedObj.params || ""}
-                      onChange={e => updateObject(selectedObj.id, { params: e.target.value })} placeholder="Q=..., L=..." />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-500">Угол, °</label>
-                    <input className={inputCls} type="number" value={selectedObj.angle}
-                      onChange={e => updateObject(selectedObj.id, { angle: parseFloat(e.target.value) || 0 })} />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-500">Цвет</label>
-                    <div className="flex gap-1.5 flex-wrap">
-                      {["#f59e0b","#94a3b8","#64748b","#60a5fa","#f97316","#22c55e","#ef4444"].map(c => (
-                        <button key={c} onClick={() => updateObject(selectedObj.id, { color: c })}
-                          className="h-6 w-6 rounded-full border-2 transition-all"
-                          style={{ background: c, borderColor: selectedObj.color === c ? "#3b82f6" : "transparent" }} />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Удалить */}
-            {selectedId && (
-              <div className="border-t border-slate-100 p-3">
-                <button
-                  onClick={() => {
-                    setScheme(s => ({
-                      airways: s.airways.filter(a => a.id !== selectedId),
-                      positions: s.positions.filter(p => p.id !== selectedId),
-                      objects: s.objects.filter(o => o.id !== selectedId),
-                    }));
-                    setSelectedId(null);
-                    setPropPanel(null);
-                  }}
-                  className="flex w-full items-center justify-center gap-1.5 rounded py-1.5 text-xs font-medium transition-all hover:opacity-80"
-                  style={{ background: "#fee2e2", color: "#dc2626" }}>
-                  <Icon name="Trash2" size={12} />
-                  Удалить
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
+        {propPanel && (() => {
+          // локальная вкладка панели (общие / вентиляция / аэродинамика)
+          // используем ref чтобы не перерисовывать весь компонент
+          return (
+          <AirwayPropPanel
+            propPanel={propPanel}
+            selectedAirway={selectedAirway}
+            selectedPos={selectedPos}
+            selectedObj={selectedObj}
+            selectedId={selectedId}
+            calcResult={calcResult}
+            inputCls={inputCls}
+            POSITION_COLORS={POSITION_COLORS}
+            AIRWAY_STYLES={AIRWAY_STYLES}
+            updateAirway={updateAirway}
+            updatePosition={updatePosition}
+            updateObject={updateObject}
+            onClose={() => { setPropPanel(null); setSelectedId(null); }}
+            onDelete={() => {
+              setScheme(s => ({
+                airways: s.airways.filter(a => a.id !== selectedId),
+                positions: s.positions.filter(p => p.id !== selectedId),
+                objects: s.objects.filter(o => o.id !== selectedId),
+              }));
+              setSelectedId(null);
+              setPropPanel(null);
+            }}
+          />
+          );
+        })()}
         {/* ── Панель свойств узла ── */}
         {selectedNodeId && nodeProps[selectedNodeId] && (
           <NodePropertiesPanel
