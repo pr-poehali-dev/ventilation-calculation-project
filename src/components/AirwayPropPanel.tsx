@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import Icon from "@/components/ui/icon";
 import { CalcResult } from "@/lib/aeroCalc";
+import FanPropertiesPanel from "@/components/FanPropertiesPanel";
 
 // ─── Типы (дублируем минимально нужное) ──────────────────────────────────────
 type AirwayStyle = "main" | "branch" | "intake" | "exhaust" | "tube";
@@ -504,8 +505,19 @@ export default function AirwayPropPanel({
           </div>
         )}
 
-        {/* ── Свойства объекта ── */}
-        {propPanel.type === "object" && selectedObj && (
+        {/* ── Вентилятор — полная панель ── */}
+        {propPanel.type === "object" && selectedObj?.type === "fan" && (
+          <FanPropertiesPanel
+            fan={selectedObj}
+            onUpdate={patch => updateObject(selectedObj.id, patch)}
+            onClose={onClose}
+            onDelete={onDelete}
+            inputCls={inputCls}
+          />
+        )}
+
+        {/* ── Прочие объекты (дверь, перемычка, датчик...) ── */}
+        {propPanel.type === "object" && selectedObj && selectedObj.type !== "fan" && (
           <div className="p-3 space-y-2">
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-500">Название</label>
@@ -536,8 +548,8 @@ export default function AirwayPropPanel({
         )}
       </div>
 
-      {/* Кнопка Удалить */}
-      {selectedId && (
+      {/* Кнопка Удалить (только для не-вентиляторов — у вентилятора своя кнопка внутри) */}
+      {selectedId && selectedObj?.type !== "fan" && (
         <div className="flex-shrink-0 border-t border-slate-100 p-2">
           <button onClick={onDelete}
             className="flex w-full items-center justify-center gap-1.5 rounded py-1.5 text-xs font-medium transition-all hover:opacity-80"

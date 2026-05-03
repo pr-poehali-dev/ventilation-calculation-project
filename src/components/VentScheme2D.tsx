@@ -86,6 +86,23 @@ interface SchemeObject {
   label?: string;
   params?: string;
   color?: string;
+  // Вентилятор
+  fanModel?: string;
+  fanDiameter?: string;      // мм
+  fanRPM?: string;           // об/мин
+  fanBladeAngle?: string;    // угол лопаток, °
+  fanDriveType?: string;     // тип привода
+  fanMotorPower?: string;    // мощность двигателя, кВт
+  fanMotorVoltage?: string;  // напряжение, В
+  fanInstallYear?: string;
+  fanInstallMonth?: string;
+  fanRemarks?: string;
+  // Рабочая точка (из расчёта)
+  fanWorkQ?: number;         // расход в рабочей точке, м³/с
+  fanWorkP?: number;         // давление в рабочей точке, Па
+  // Кривая Q-P: массив точек [Q, P]
+  fanCurve?: [number, number][];
+  fanEffCurve?: [number, number][]; // кривая КПД [Q, η%]
 }
 
 interface SchemeData {
