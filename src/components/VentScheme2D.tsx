@@ -1,6 +1,8 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import VentScheme3DView, { Airway3D, Position3D, PlaneInfo } from "@/components/VentScheme3DView";
+import DxfImportDialog from "@/components/DxfImportDialog";
+import { ConvertedScheme } from "@/lib/dxfParser";
 
 // ─── Типы ──────────────────────────────────────────────────────────────────────
 type ToolMode =
@@ -315,6 +317,35 @@ export default function VentScheme2D() {
   // 3D режим
   const [show3D, setShow3D] = useState(false);
   const [lastPlane, setLastPlane] = useState<PlaneInfo | null>(null);
+
+  // DXF импорт
+  const [showDxfImport, setShowDxfImport] = useState(false);
+
+  const handleDxfImport = (data: ConvertedScheme, mode: "replace" | "append") => {
+    const newAirways = data.airways.map(a => ({
+      id: a.id,
+      points: a.points,
+      style: a.style,
+      label: a.label,
+      z: a.z,
+    }));
+    const newPositions = data.positions.map(p => ({
+      id: p.id,
+      x: p.x, y: p.y, z: p.z,
+      num: p.num,
+      color: p.color,
+      label: p.label,
+    }));
+    if (mode === "replace") {
+      setScheme({ airways: newAirways, positions: newPositions, objects: [] });
+    } else {
+      setScheme(s => ({
+        ...s,
+        airways: [...s.airways, ...newAirways],
+        positions: [...s.positions, ...newPositions],
+      }));
+    }
+  };
 
   // ── Координаты холста → мировые ───────────────────────────────────────────
   const toWorld = (cx: number, cy: number) => ({
@@ -905,6 +936,16 @@ export default function VentScheme2D() {
 
           <div className="h-5 w-px bg-slate-200" />
 
+          {/* Импорт DXF */}
+          <button onClick={() => setShowDxfImport(true)}
+            className="flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-all hover:opacity-90"
+            style={{ background: "#0369a1", color: "#fff" }}>
+            <Icon name="FileUp" size={13} />
+            Импорт DXF
+          </button>
+
+          <div className="h-5 w-px bg-slate-200" />
+
           {/* Кнопка 3D */}
           <button onClick={() => setShow3D(true)}
             className="flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-all hover:opacity-90"
@@ -1171,6 +1212,14 @@ export default function VentScheme2D() {
           <span>Объектов: {scheme.objects.length}</span>
         </div>
       </div>
+
+      {/* ── DXF импорт диалог ── */}
+      {showDxfImport && (
+        <DxfImportDialog
+          onImport={handleDxfImport}
+          onClose={() => setShowDxfImport(false)}
+        />
+      )}
     </div>
   );
 }
