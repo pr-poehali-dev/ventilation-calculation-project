@@ -75,6 +75,7 @@ export interface CalcResult {
   totalFlow:         number;                  // суммарный расход, м³/с
   maxResidual:       number;                  // макс. невязка контура, Па
   balanceError:      number;                  // ошибка баланса в узлах, м³/с
+  deadAirways:       Set<string>;             // id тупиковых непроветриваемых ветвей
 }
 
 // ─── Физические константы ─────────────────────────────────────────────────────
@@ -473,7 +474,94 @@ function calcNatDraft(
   return res;
 }
 
-// ─── 8. Главная функция ────────────────────────────────────────────────────────
+// ─── 8. Определение проветриваемых ветвей ────────────────────────────────────
+// Ветвь получает воздух только если существует путь от атмосферного узла
+// ИЛИ от узла с ВМП до обоих её концов (узлов).
+// Тупиковые ветви (нет такого пути) — Q обнуляем.
+//
+// Алгоритм:
+//   1. Строим "источники вентиляции": атм. узлы + узлы на ветвях с ВМП
+//   2. BFS по НЕОРИЕНТИРОВАННОМУ графу от всех источников
+//   3. Ветвь "проветривается" если оба её конца достижимы из источников
+//   4. Для тупиковых ветвей (один конец — тупик, нет второго пути) —
+//      дополнительная проверка: узел является степени 1 и не является источником
+
+function findVentilatedAirways(
+  nodes:   CalcNode[],
+  airways: CalcAirway[],
+): Set<string> {
+  // Источники проветривания
+  const sources = new Set<string>();
+
+  // Атмосферные узлы
+  nodes.filter(n => n.connectedToAtm).forEach(n => sources.add(n.id));
+
+  // Узлы на ветвях с ВМП (вентилятором местного проветривания)
+  airways.forEach(aw => {
+    if (aw.fanPressure !== undefined && aw.fanPressure > 0 ||
+        aw.fanCurveA   !== undefined && aw.fanCurveA   > 0) {
+      sources.add(aw.nodeFrom);
+      sources.add(aw.nodeTo);
+    }
+  });
+
+  // Нет ни одного источника — никакого воздуха нет
+  if (sources.size === 0) return new Set<string>();
+
+  // BFS от всех источников по неориентированному графу
+  const reachable = new Set<string>(sources);
+  const queue     = [...sources];
+  while (queue.length > 0) {
+    const u = queue.shift()!;
+    for (const aw of airways) {
+      const nb = aw.nodeFrom === u ? aw.nodeTo
+               : aw.nodeTo   === u ? aw.nodeFrom
+               : null;
+      if (nb && !reachable.has(nb)) {
+        reachable.add(nb);
+        queue.push(nb);
+      }
+    }
+  }
+
+  // Степень каждого узла (количество смежных ветвей)
+  const degree = new Map<string, number>();
+  nodes.forEach(n => degree.set(n.id, 0));
+  airways.forEach(aw => {
+    degree.set(aw.nodeFrom, (degree.get(aw.nodeFrom) ?? 0) + 1);
+    degree.set(aw.nodeTo,   (degree.get(aw.nodeTo)   ?? 0) + 1);
+  });
+
+  // Ветвь проветривается если:
+  //   — оба конца достижимы из источников
+  //   — И хотя бы один конец не является тупиковым узлом (степень 1)
+  //     без источника (т.е. не атмосфера и не ВМП)
+  const ventilated = new Set<string>();
+  for (const aw of airways) {
+    const fromReach = reachable.has(aw.nodeFrom);
+    const toReach   = reachable.has(aw.nodeTo);
+
+    if (!fromReach || !toReach) continue; // недостижима
+
+    // Проверяем тупиковость: если один из узлов степени 1 и не является
+    // источником — это тупиковая ветвь без сквозного проветривания
+    const fromDead = (degree.get(aw.nodeFrom) ?? 0) === 1 && !sources.has(aw.nodeFrom);
+    const toDead   = (degree.get(aw.nodeTo)   ?? 0) === 1 && !sources.has(aw.nodeTo);
+
+    // Ветвь тупиковая только если ОБА конца тупиковые (изолированный сегмент)
+    // или ОДИН тупиковый + ветвь с ВМП (тогда ВМП сама создаёт поток)
+    const hasFan = (aw.fanPressure !== undefined && aw.fanPressure > 0) ||
+                   (aw.fanCurveA   !== undefined && aw.fanCurveA   > 0);
+
+    if (fromDead && toDead && !hasFan) continue; // тупик без ВМП
+
+    ventilated.add(aw.id);
+  }
+
+  return ventilated;
+}
+
+// ─── 9. Главная функция ────────────────────────────────────────────────────────
 
 export function runAeroCalc(
   nodes:   CalcNode[],
@@ -501,27 +589,54 @@ export function runAeroCalc(
     warnings.push(`Граф не связен: ${nodes.length - visited.size} изолированных узлов`);
   }
 
-  // Строим базис циклов
-  const cycleBase = buildCycleBase(nodes, airways);
+  // (базис циклов строится ниже только по активным ветвям)
 
-  if (cycleBase.loops.length === 0) {
-    warnings.push("Контуров не найдено — сеть является деревом, баланс определяется однозначно");
+  // Определяем проветриваемые ветви ДО расчёта
+  const ventilatedAirways = findVentilatedAirways(nodes, airways);
+
+  // Тупиковые ветви — фиксируем Q=0 (они не участвуют в Харди-Кросс)
+  const deadAirways = airways.filter(aw => !ventilatedAirways.has(aw.id));
+  if (deadAirways.length > 0) {
+    deadAirways.forEach(aw => {
+      warnings.push(
+        `Ветвь "${aw.label ?? aw.id}" — тупиковая, нет пути к атмосфере и ВМП → Q=0`
+      );
+    });
   }
 
-  // Харди-Кросс
-  const { Q, iters, converged, residuals } = hardyCross(
-    airways,
-    cycleBase.loops,
-    cycleBase.loopDirs,
+  // Для расчёта используем только проветриваемые ветви
+  const activeAirways = airways.filter(aw => ventilatedAirways.has(aw.id));
+
+  // Строим базис циклов только по активным ветвям
+  const activeNodes = nodes.filter(n =>
+    activeAirways.some(aw => aw.nodeFrom === n.id || aw.nodeTo === n.id)
+  );
+  const cycleBaseActive = activeAirways.length > 0
+    ? buildCycleBase(activeNodes, activeAirways)
+    : { loops: [], loopDirs: [], treeEdges: new Set<string>(), chords: [] };
+
+  if (cycleBaseActive.loops.length === 0 && activeAirways.length > 0) {
+    warnings.push("Контуров не найдено — активная сеть является деревом, баланс определяется однозначно");
+  }
+
+  // Харди-Кросс только по активным ветвям
+  const { Q: Qactive, iters, converged, residuals } = hardyCross(
+    activeAirways,
+    cycleBaseActive.loops,
+    cycleBaseActive.loopDirs,
     500,
-    0.5,   // невязка 0.5 Па — достаточно для инженерной точности
+    0.5,
   );
 
-  if (!converged) {
+  // Объединяем: тупиковые ветви получают Q=0
+  const Q: Record<string, number> = { ...Qactive };
+  deadAirways.forEach(aw => { Q[aw.id] = 0; });
+
+  if (!converged && activeAirways.length > 0) {
     warnings.push(`Расчёт не сошёлся за 500 итераций. Макс. невязка: ${Math.max(...residuals).toFixed(1)} Па`);
   }
 
-  // Узловые давления
+  // Узловые давления (по всем ветвям, тупиковые с Q=0)
   const nodePressure = calcNodePressures(nodes, airways, Q);
 
   // Температуры
@@ -584,18 +699,20 @@ export function runAeroCalc(
     nodeGasConc, nodeExplosionP, nodeNatDraft,
     airwayQ: Q, airwayV, airwayDeltaP, airwayR, airwayDir, airwayFanDeltaP,
     loopResiduals: residuals,
-    loopIds: cycleBase.loops,
+    loopIds: cycleBaseActive.loops,
     errors, warnings,
     iterations: iters, converged,
     totalFlow,
     maxResidual: residuals.length > 0 ? Math.max(...residuals) : 0,
     balanceError,
+    deadAirways: new Set(deadAirways.map(aw => aw.id)),
   };
 }
 
 // ─── Пустой результат ─────────────────────────────────────────────────────────
 function emptyResult(errors: string[]): CalcResult {
   return {
+    deadAirways: new Set(),
     nodePressure: {}, nodeAirTemp: {}, nodeWallTemp: {},
     nodeGasConc: {}, nodeExplosionP: {}, nodeNatDraft: {},
     airwayQ: {}, airwayV: {}, airwayDeltaP: {}, airwayR: {}, airwayDir: {},

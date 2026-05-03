@@ -144,9 +144,10 @@ export default function AeroCalcPanel({ result, nodes, airways, fanLinks = [], f
                       value: fmt1(Math.max(0, ...Object.values(result.airwayV))), unit: "м/с",
                       icon: "Zap",
                       color: Math.max(0, ...Object.values(result.airwayV)) > 8 ? "#ef4444" : "#f59e0b" },
-                    { label: "Ошибка баланса",    value: result.balanceError.toFixed(3), unit: "м³/с",
-                      icon: "Scale",
-                      color: result.balanceError < 0.1 ? "#22c55e" : result.balanceError < 1 ? "#f59e0b" : "#ef4444" },
+                    { label: "Тупиковых ветвей",
+                      value: String(result.deadAirways?.size ?? 0), unit: "шт.",
+                      icon: "XCircle",
+                      color: (result.deadAirways?.size ?? 0) > 0 ? "#f97316" : "#22c55e" },
                   ].map(c => (
                     <div key={c.label} className="rounded-xl p-3 border"
                       style={{ background: c.color + "0d", borderColor: c.color + "30" }}>

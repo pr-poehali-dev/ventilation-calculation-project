@@ -727,6 +727,55 @@ export default function VentScheme2D() {
       }
     });
 
+    // ── Подсветка тупиковых ветвей (нет воздуха) ─────────────────────────
+    if (calcResult?.deadAirways?.size) {
+      scheme.airways.forEach((aw) => {
+        if (aw.points.length < 2) return;
+        const segKey = `${aw.id}_seg0`;
+        if (!calcResult.deadAirways.has(segKey)) return;
+
+        // Серая штриховка поверх ветви
+        ctx.strokeStyle = "rgba(148,163,184,0.7)";
+        ctx.lineWidth   = 3;
+        ctx.setLineDash([6, 5]);
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        aw.points.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Значок «нет воздуха» в середине ветви
+        const mid = Math.floor(aw.points.length / 2);
+        const p1  = aw.points[mid - 1] || aw.points[0];
+        const p2  = aw.points[mid]     || aw.points[aw.points.length - 1];
+        const mx  = (p1.x + p2.x) / 2;
+        const my  = (p1.y + p2.y) / 2;
+
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
+        ctx.beginPath();
+        ctx.arc(mx, my, 10, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#ef4444";
+        ctx.lineWidth   = 1.5;
+        ctx.beginPath();
+        ctx.arc(mx, my, 8, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Перечёркнутая стрелка (Q=0)
+        ctx.strokeStyle = "#ef4444";
+        ctx.lineWidth   = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(mx - 5, my - 5);
+        ctx.lineTo(mx + 5, my + 5);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(mx + 5, my - 5);
+        ctx.lineTo(mx - 5, my + 5);
+        ctx.stroke();
+      });
+    }
+
     // ── Стрелки направления воздуха (по результатам расчёта) ─────────────
     if (calcResult) {
       scheme.airways.forEach((aw) => {
