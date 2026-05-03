@@ -6,6 +6,8 @@ import { ConvertedScheme } from "@/lib/dxfParser";
 import NodePropertiesPanel, {
   NodeProperties, NodeMeasurement, NodePipe, NodeIndicator, defaultNode,
 } from "@/components/NodePropertiesPanel";
+import AeroCalcPanel from "@/components/AeroCalcPanel";
+import { runAeroCalc, schemeToCalcGraph, CalcResult, CalcNode, CalcAirway } from "@/lib/aeroCalc";
 
 // ─── Типы ──────────────────────────────────────────────────────────────────────
 type ToolMode =
@@ -343,6 +345,63 @@ export default function VentScheme2D() {
     setNodeProps(prev => ({ ...prev, [key]: { ...prev[key], ...patch } }));
   };
 
+  // ── Аэродинамический расчёт ───────────────────────────────────────────────
+  const [calcResult, setCalcResult] = useState<CalcResult | null>(null);
+  const [calcNodes, setCalcNodes] = useState<CalcNode[]>([]);
+  const [calcAirways, setCalcAirways] = useState<CalcAirway[]>([]);
+  const [showCalcPanel, setShowCalcPanel] = useState(false);
+  const [isCalcRunning, setIsCalcRunning] = useState(false);
+
+  const runCalc = () => {
+    setIsCalcRunning(true);
+    setTimeout(() => {
+      // Собираем props узлов для передачи в конвертер
+      const nodeOverrides: Record<string, {
+        coordZ: number; airTemp: number; wallTemp: number;
+        appliedPressure: number; connectedToAtm: boolean;
+      }> = {};
+      Object.entries(nodeProps).forEach(([key, np]) => {
+        nodeOverrides[key] = {
+          coordZ: np.coordZ,
+          airTemp: np.airTemp,
+          wallTemp: np.wallTemp,
+          appliedPressure: np.appliedPressure,
+          connectedToAtm: np.connectedToAtm,
+        };
+      });
+
+      const { nodes, airways: calAirways } = schemeToCalcGraph(scheme.airways, nodeOverrides);
+      const result = runAeroCalc(nodes, calAirways);
+
+      // Обновляем вычисленные поля в NodeProperties
+      setNodeProps(prev => {
+        const next = { ...prev };
+        Object.entries(result.nodePressure).forEach(([nid, p]) => {
+          // Ищем совпадение по id узла (ключ может отличаться)
+          Object.keys(next).forEach(key => {
+            if (next[key].id === nid || key === nid) {
+              next[key] = {
+                ...next[key],
+                calcPressure: Math.round(p),
+                calcAirTemp: Math.round((result.nodeAirTemp[nid] ?? next[key].airTemp) * 10) / 10,
+                calcWallTemp: Math.round((result.nodeWallTemp[nid] ?? next[key].wallTemp) * 10) / 10,
+                calcGasConc: Math.round((result.nodeGasConc[nid] ?? 0) * 100) / 100,
+                calcExplosionPressure: Math.round(result.nodeExplosionP[nid] ?? 0),
+              };
+            }
+          });
+        });
+        return next;
+      });
+
+      setCalcNodes(nodes);
+      setCalcAirways(calAirways);
+      setCalcResult(result);
+      setIsCalcRunning(false);
+      setShowCalcPanel(true);
+    }, 50);
+  };
+
   const handleDxfImport = (data: ConvertedScheme, mode: "replace" | "append") => {
     const newAirways = data.airways.map(a => ({
       id: a.id,
@@ -530,7 +589,20 @@ export default function VentScheme2D() {
         if (aw.l) sub.push(`L=${aw.l}м`);
         if (aw.s) sub.push(`S=${aw.s}м²`);
         if (sub.length) lines.push(sub.join(", "));
-        if (aw.q) lines.push(`Q=${aw.q} м³/с`);
+        // Показываем расчётные Q и v если есть результат
+        const calcQ = calcResult ? (() => {
+          const segKey = `${aw.id}_seg0`;
+          return calcResult.airwayQ[segKey];
+        })() : undefined;
+        const calcV = calcResult ? (() => {
+          const segKey = `${aw.id}_seg0`;
+          return calcResult.airwayV[segKey];
+        })() : undefined;
+        if (calcQ !== undefined) {
+          lines.push(`Q=${Math.abs(calcQ).toFixed(1)} м³/с  v=${(calcV??0).toFixed(1)} м/с`);
+        } else if (aw.q) {
+          lines.push(`Q=${aw.q} м³/с`);
+        }
 
         lines.forEach((line, li) => {
           const isFirst = li === 0;
@@ -661,7 +733,7 @@ export default function VentScheme2D() {
     }
 
     ctx.restore();
-  }, [scheme, viewport, selectedId, selectedNodeId, nodeProps, tool, drawingAirway, mousePos, airwayStyle]);
+  }, [scheme, viewport, selectedId, selectedNodeId, nodeProps, tool, drawingAirway, mousePos, airwayStyle, calcResult]);
 
   useEffect(() => { redraw(); }, [redraw]);
 
@@ -1001,6 +1073,26 @@ export default function VentScheme2D() {
 
           <div className="h-5 w-px bg-slate-200" />
 
+          {/* Расчёт */}
+          <button onClick={() => { runCalc(); }}
+            disabled={isCalcRunning}
+            className="flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-all hover:opacity-90 disabled:opacity-60"
+            style={{ background: calcResult ? "#22c55e" : "#7c3aed", color: "#fff" }}>
+            {isCalcRunning
+              ? <><Icon name="Loader" size={13} className="animate-spin" />Расчёт...</>
+              : <><Icon name="Calculator" size={13} />Расчёт</>}
+          </button>
+          {calcResult && (
+            <button onClick={() => setShowCalcPanel(v => !v)}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-all hover:opacity-80"
+              style={{ background: showCalcPanel ? "#ede9fe" : "#f3f4f6", color: showCalcPanel ? "#7c3aed" : "#64748b" }}>
+              <Icon name="BarChart3" size={12} />
+              {showCalcPanel ? "Скрыть" : "Результаты"}
+            </button>
+          )}
+
+          <div className="h-5 w-px bg-slate-200" />
+
           {/* Импорт DXF */}
           <button onClick={() => setShowDxfImport(true)}
             className="flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-all hover:opacity-90"
@@ -1289,6 +1381,18 @@ export default function VentScheme2D() {
           <span>Объектов: {scheme.objects.length}</span>
         </div>
       </div>
+
+      {/* ── Панель результатов расчёта ── */}
+      {showCalcPanel && (
+        <AeroCalcPanel
+          result={calcResult}
+          nodes={calcNodes}
+          airways={calcAirways}
+          onClose={() => setShowCalcPanel(false)}
+          onRecalc={runCalc}
+          isRunning={isCalcRunning}
+        />
+      )}
 
       {/* ── DXF импорт диалог ── */}
       {showDxfImport && (
