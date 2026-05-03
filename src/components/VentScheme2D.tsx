@@ -621,6 +621,105 @@ export default function VentScheme2D() {
       }
     });
 
+    // ── Стрелки направления воздуха (по результатам расчёта) ─────────────
+    if (calcResult) {
+      scheme.airways.forEach((aw) => {
+        if (aw.points.length < 2) return;
+        const segKey = `${aw.id}_seg0`;
+        const q = calcResult.airwayQ[segKey];
+        const v = calcResult.airwayV[segKey] ?? 0;
+        const dir = calcResult.airwayDir[segKey] ?? 1;
+        if (q === undefined) return;
+
+        const st = AIRWAY_STYLES[aw.style];
+
+        // Цвет стрелки по скорости
+        const arrowColor =
+          v > 8 ? "#ef4444" :
+          v > 4 ? "#f59e0b" :
+          v > 0.5 ? "#22c55e" : "#94a3b8";
+
+        // Размер наконечника зависит от скорости
+        const arrowSize = Math.max(7, Math.min(16, v * 2));
+
+        // Рисуем стрелки вдоль каждого сегмента выработки
+        for (let si = 0; si < aw.points.length - 1; si++) {
+          const pA = dir === 1 ? aw.points[si] : aw.points[si + 1];
+          const pB = dir === 1 ? aw.points[si + 1] : aw.points[si];
+
+          const segLen = Math.hypot(pB.x - pA.x, pB.y - pA.y);
+          if (segLen < 30) continue;
+
+          const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x);
+
+          // Количество стрелок на сегменте (не чаще чем каждые 80px)
+          const arrowCount = Math.max(1, Math.floor(segLen / 80));
+
+          for (let ai = 0; ai < arrowCount; ai++) {
+            const t = (ai + 1) / (arrowCount + 1); // позиция вдоль сегмента
+            const ax = pA.x + (pB.x - pA.x) * t;
+            const ay = pA.y + (pB.y - pA.y) * t;
+
+            ctx.save();
+            ctx.translate(ax, ay);
+            ctx.rotate(angle);
+
+            // Фоновый кружок для читаемости
+            ctx.fillStyle = "rgba(255,255,255,0.75)";
+            ctx.beginPath();
+            ctx.arc(0, 0, arrowSize * 0.85, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Наконечник стрелки
+            ctx.fillStyle = arrowColor;
+            ctx.strokeStyle = arrowColor;
+            ctx.lineWidth = 1.5;
+
+            // Тело стрелки
+            ctx.beginPath();
+            ctx.moveTo(-arrowSize * 0.55, 0);
+            ctx.lineTo(arrowSize * 0.2, 0);
+            ctx.stroke();
+
+            // Треугольник-наконечник
+            ctx.beginPath();
+            ctx.moveTo(arrowSize * 0.65, 0);
+            ctx.lineTo(arrowSize * 0.1, -arrowSize * 0.38);
+            ctx.lineTo(arrowSize * 0.1,  arrowSize * 0.38);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.restore();
+          }
+
+          // Подпись скорости на первом сегменте (в середине)
+          if (si === 0 && v > 0.1) {
+            const mx = (pA.x + pB.x) / 2;
+            const my = (pA.y + pB.y) / 2;
+            const ang = Math.atan2(pB.y - pA.y, pB.x - pA.x);
+
+            ctx.save();
+            ctx.translate(mx, my);
+            ctx.rotate(ang);
+
+            const label = `${v.toFixed(1)} м/с`;
+            ctx.font = "bold 9px 'IBM Plex Mono', monospace";
+            const tw = ctx.measureText(label).width;
+            const yOff = st.width / 2 + 10;
+
+            ctx.fillStyle = "rgba(255,255,255,0.85)";
+            ctx.fillRect(-tw / 2 - 2, yOff - 9, tw + 4, 12);
+
+            ctx.fillStyle = arrowColor;
+            ctx.textAlign = "center";
+            ctx.fillText(label, 0, yOff);
+
+            ctx.restore();
+          }
+        }
+      });
+    }
+
     // ── Рисуемая выработка ────────────────────────────────────────────────
     if (tool === "airway" && drawingAirway.length > 0) {
       const st = AIRWAY_STYLES[airwayStyle];
